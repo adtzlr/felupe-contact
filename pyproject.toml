@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[tool.isort]
+profile = "black"
+
+[project]
+name = "felupe"
+description = "Contact Extension-package for FElupe."
+readme = "README.md"
+authors = [
+  {name = "Andreas Dutzler", email = "a.dutzler@gmail.com"},
+]
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+keywords = [
+  "computational-mechanics",
+  "contact-mechanics",
+  "fea",
+  "fem",
+  "finite-elements",
+  "finite-elements-methods",
+  "partial-differential-equations",
+  "python", 
+  "scientific-computing",
+  "solid-mechanics-codes",
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Topic :: Utilities"
+]
+dynamic = ["version"]
+
+dependencies = [
+  "felupe",
+]
+
+[project.optional-dependencies]
+docs = [
+    "sphinx",
+    "pydata-sphinx-theme",
+    "sphinx-autoapi",
+    "sphinx-codeautolink",
+    "sphinx-copybutton",
+    "sphinx-design",
+    "sphinx-gallery",
+    "sphinx-inline-tabs",
+    "pypandoc",
+]
+
+[dependency-groups]
+read-the-docs = ["felupe[all,docs,examples]"]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+
+[tool.uv.sources]
+setuptools = {index = "pypi"}
+torch = {index = "pytorch-cpu"}
+torchvision = {index = "pytorch-cpu"}
+
+[tool.setuptools.dynamic]
+version = {attr = "felupe.__about__.__version__"}
+
+[project.urls]
+Homepage = "https://felupe-contact.readthedocs.io/en/latest"
+Documentation = "https://felupe-contact.readthedocs.io/en/latest"
+Repository = "https://github.com/adtzlr/felupe-contact"
+Issues = "https://github.com/adtzlr/felupe-contact/issues"
+Changelog = "https://github.com/adtzlr/felupe-contact/blob/main/CHANGELOG.md"
