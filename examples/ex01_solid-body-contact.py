@@ -31,10 +31,11 @@ mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
 secondary = fem.FieldContainer(
     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
 )
+mask_primary = np.isclose(mesh.z, 1.0)
 primary = fem.FieldContainer(
     [
         fem.Field(
-            fem.RegionHexahedronBoundary(mesh, mask=np.isclose(mesh.z, 1.0)),
+            fem.RegionHexahedronBoundary(mesh, mask=mask_primary),
             dim=3,
         )
     ]
