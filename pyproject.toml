@@ -60,6 +60,7 @@ docs = [
     "sphinx-inline-tabs",
     "pypandoc",
 ]
+all = ["felupe[all]"]
 
 [dependency-groups]
 read-the-docs = ["felupe-contact[docs]", "felupe[all,docs,examples]"]
