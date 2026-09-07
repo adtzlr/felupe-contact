@@ -290,11 +290,11 @@ class ContactSurfacePair:
 
         vertices = self.vertices(region.mesh.points, region.mesh.cells_faces)
 
-        # the outward unit normal vectors of the boundary region, evaluated at the
-        # first quadrature point of each face, define the orientation of a face
+        # the outward unit normal vectors of the boundary region, evaluated as the
+        # mean of all quadrature points of each face, define the orientation of a face
         normal = cross(vertices[1] - vertices[0], vertices[3] - vertices[0])
 
-        return np.sign(dot(normal, region.normals[:, 0], mode=(1, 1)))
+        return np.sign(dot(normal, region.normals.mean(axis=1), mode=(1, 1)))
 
     @staticmethod
     def vertices(x, cells_faces):
