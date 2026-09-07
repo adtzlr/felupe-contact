@@ -338,14 +338,67 @@ def test_requires_a_boundary_region():
         SolidBodyContact(volume, surface(mesh), penalty=1.0)
 
 
-def test_requires_a_hexahedron_mesh():
-    "Only boundary regions of hexahedron meshes are supported."
+def test_requires_a_plane_strain_or_axisymmetric_field():
+    "A cartesian field is not valid for a boundary region of a two-dimensional mesh."
 
     mesh = fem.Rectangle(n=3)
     quad = fem.FieldContainer([fem.Field(fem.RegionQuadBoundary(mesh), dim=2)])
 
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(TypeError, match="FieldPlaneStrain"):
         SolidBodyContact(quad, quad, penalty=1.0)
+
+
+def test_requires_a_two_or_three_dimensional_mesh():
+    "Only boundary regions of two- and three-dimensional meshes are supported."
+
+    mesh = fem.Rectangle(n=3)
+    region = fem.RegionQuadBoundary(mesh)
+    quad = fem.FieldContainer([fem.FieldPlaneStrain(region, dim=2)])
+
+    region.mesh.dim = 1
+
+    with pytest.raises(NotImplementedError, match="1d mesh"):
+        SolidBodyContact(quad, quad, penalty=1.0)
+
+
+def test_requires_a_cartesian_field_in_3d():
+    "A plane strain field is not valid for a boundary region of a 3d mesh."
+
+    mesh = two_blocks()
+    region = fem.RegionHexahedronBoundary(mesh)
+    plane = fem.FieldContainer([fem.FieldPlaneStrain(region, dim=3)])
+
+    with pytest.raises(TypeError, match="`Field`"):
+        SolidBodyContact(plane, plane, penalty=1.0)
+
+
+def test_requires_equal_field_types():
+    "The fields of both contact surfaces must be of the same type."
+
+    mesh = fem.Rectangle(n=3)
+    region = fem.RegionQuadBoundary(mesh)
+    plane = fem.FieldContainer([fem.FieldPlaneStrain(region, dim=2)])
+    axi = fem.FieldContainer([fem.FieldAxisymmetric(region, dim=2)])
+
+    with pytest.raises(TypeError, match="same type"):
+        SolidBodyContact(plane, axi, penalty=1.0)
+
+
+def test_requires_equal_cell_types():
+    "The meshes of both boundary regions must be of the same cell type."
+
+    mesh = fem.Rectangle(n=3)
+    quadratic = fem.mesh.convert(mesh, order=2, calc_midfaces=True)
+
+    linear = fem.FieldContainer(
+        [fem.FieldPlaneStrain(fem.RegionQuadBoundary(mesh), dim=2)]
+    )
+    biquadratic = fem.FieldContainer(
+        [fem.FieldPlaneStrain(fem.RegionBiQuadraticQuadBoundary(quadratic), dim=2)]
+    )
+
+    with pytest.raises(TypeError, match="cell types"):
+        SolidBodyContact(linear, biquadratic, penalty=1.0)
 
 
 def test_warns_for_a_single_body():
