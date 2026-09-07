@@ -62,7 +62,7 @@ docs = [
 ]
 
 [dependency-groups]
-read-the-docs = ["felupe-contact[docs]", "felupe[all,examples]"]
+read-the-docs = ["felupe-contact[docs]", "felupe[all,docs,examples]"]
 
 [[tool.uv.index]]
 name = "pypi"
