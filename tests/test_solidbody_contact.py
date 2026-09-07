@@ -275,12 +275,15 @@ def test_normals_point_outwards():
     contact = SolidBodyContact(secondary, surface(mesh), penalty=1.0, self_contact=True)
 
     pair = contact.pairs[0]
+
+    # the unit normal vectors are given in the array-layout of FElupe, i.e. with the
+    # components on the leading and the faces on the trailing axis
     normals = pair.normals(mesh.points)
     center = mesh.points[pair.cells_faces].mean(axis=1)
 
-    assert np.allclose(np.linalg.norm(normals, axis=1), 1.0)
-    assert np.allclose(normals[np.isclose(center[:, 2], 0.0)], [0.0, 0.0, -1.0])
-    assert np.allclose(normals[np.isclose(center[:, 2], 1.0)], [0.0, 0.0, 1.0])
+    assert np.allclose(fem.math.norm(normals, axis=0), 1.0)
+    assert np.allclose(normals[:, np.isclose(center[:, 2], 0.0)].T, [0.0, 0.0, -1.0])
+    assert np.allclose(normals[:, np.isclose(center[:, 2], 1.0)].T, [0.0, 0.0, 1.0])
 
 
 def test_separated_bodies_are_not_in_contact():

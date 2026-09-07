@@ -23,90 +23,44 @@ from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
-from felupe import IntegralForm
+from felupe import Field, IntegralForm, Quad
+from felupe.math import cross, det, dot, dya, inv, norm, transpose
 from felupe.mechanics import Assemble, Results
 
-# second derivative of the shape functions of a bilinear quad w.r.t. the natural
-# element coordinates: only the mixed derivative is non-zero
-D2HDRDS = np.array([0.25, -0.25, 0.25, -0.25])
+# the shape functions of the faces of a boundary region of a hexahedron mesh are the
+# shape functions of a bilinear quad. all arrays are evaluated in the array-layout of
+# FElupe, i.e. the shape-function-, the tensor- and the component-axes are the leading
+# axes and the batch-axes are the trailing axes
+QUAD = Quad()
+
+# the mixed second derivative of the shape functions of a bilinear quad w.r.t. the
+# natural element coordinates is constant, all other second derivatives are zero
+D2HDRDS = QUAD.hessian([0.0, 0.0])[:, 0, 1]
 
 
-def shape_function_quad(coordinates):
-    r"""Return the shape functions and their gradients of a bilinear quad, evaluated at
-    given natural element coordinates.
+def unit_normals(u, v, orientation=1.0):
+    r"""Return the outward unit normal vectors of faces, spanned by two in-plane
+    vectors.
 
     Parameters
     ----------
-    coordinates : ndarray of shape (..., 2)
-        The natural element coordinates :math:`(r, s)`.
+    u : ndarray of shape (3, ...)
+        The first in-plane vectors of the faces.
+    v : ndarray of shape (3, ...)
+        The second in-plane vectors of the faces.
+    orientation : float or ndarray of shape (...), optional
+        The orientation :math:`\pm 1` of the faces, i.e. the sign which turns
+        :math:`\boldsymbol{u} \times \boldsymbol{v}` outwards (default is 1.0).
 
     Returns
     -------
-    h : ndarray of shape (..., 4)
-        The shape functions :math:`h_a`.
-    dhdr : ndarray of shape (..., 4, 2)
-        The gradients of the shape functions :math:`\partial h_a / \partial r_J`.
+    ndarray of shape (3, ...)
+        The outward unit normal vectors of the faces.
     """
 
-    r, s = coordinates[..., 0], coordinates[..., 1]
-    ar, as_ = (1 - r) / 4, (1 - s) / 4
-    br, bs = (1 + r) / 4, (1 + s) / 4
+    normals = cross(u, v) * orientation
 
-    h = np.empty((*coordinates.shape[:-1], 4))
-    h[..., 0] = 4 * ar * as_
-    h[..., 1] = 4 * br * as_
-    h[..., 2] = 4 * br * bs
-    h[..., 3] = 4 * ar * bs
-
-    dhdr = np.empty((*coordinates.shape[:-1], 4, 2))
-    dhdr[..., 0, 0], dhdr[..., 0, 1] = -as_, -ar
-    dhdr[..., 1, 0], dhdr[..., 1, 1] = as_, -br
-    dhdr[..., 2, 0], dhdr[..., 2, 1] = bs, br
-    dhdr[..., 3, 0], dhdr[..., 3, 1] = -bs, ar
-
-    return h, dhdr
-
-
-def solve_2x2(matrix, vector):
-    "Return the solution of a batch of 2x2 linear equation systems."
-
-    determinant = (
-        matrix[..., 0, 0] * matrix[..., 1, 1] - matrix[..., 0, 1] * matrix[..., 1, 0]
-    )
-
-    # regularize singular systems, the affected pairs are filtered out later on
-    small = np.abs(determinant) < np.finfo(float).tiny
-    determinant = np.where(small, 1.0, determinant)
-
-    solution = np.stack(
-        [
-            matrix[..., 1, 1] * vector[..., 0] - matrix[..., 0, 1] * vector[..., 1],
-            matrix[..., 0, 0] * vector[..., 1] - matrix[..., 1, 0] * vector[..., 0],
-        ],
-        axis=-1,
-    )
-
-    return solution / determinant[..., None]
-
-
-def invert_2x2(matrix):
-    "Return the inverse of a batch of symmetric 2x2 matrices."
-
-    determinant = (
-        matrix[..., 0, 0] * matrix[..., 1, 1] - matrix[..., 0, 1] * matrix[..., 1, 0]
-    )
-    small = np.abs(determinant) < np.finfo(float).tiny
-    determinant = np.where(small, 1.0, determinant)
-
-    inverse = np.stack(
-        [
-            np.stack([matrix[..., 1, 1], -matrix[..., 0, 1]], axis=-1),
-            np.stack([-matrix[..., 1, 0], matrix[..., 0, 0]], axis=-1),
-        ],
-        axis=-2,
-    )
-
-    return inverse / determinant[..., None, None]
+    return normals / norm(normals, axis=0)
 
 
 def connected_bodies(cells, npoints):
@@ -145,9 +99,9 @@ def closest_point_projection(points, vertices, maxiter=12, tol=1e-10):
 
     Parameters
     ----------
-    points : ndarray of shape (npairs, 3)
+    points : ndarray of shape (3, npairs)
         The coordinates of the points to be projected.
-    vertices : ndarray of shape (npairs, 4, 3)
+    vertices : ndarray of shape (4, 3, npairs)
         The coordinates of the vertices of the quad faces.
     maxiter : int, optional
         The maximum number of local Newton iterations (default is 12).
@@ -156,7 +110,7 @@ def closest_point_projection(points, vertices, maxiter=12, tol=1e-10):
 
     Returns
     -------
-    coordinates : ndarray of shape (npairs, 2)
+    coordinates : ndarray of shape (2, npairs)
         The natural element coordinates of the projected points.
     converged : ndarray of shape (npairs,)
         A mask with the pairs for which the projection converged.
@@ -186,37 +140,39 @@ def closest_point_projection(points, vertices, maxiter=12, tol=1e-10):
     """
 
     # the mixed second derivative of the surface coordinates is constant
-    dadr = D2HDRDS @ vertices
+    dadr = np.einsum("a,aip->ip", D2HDRDS, vertices)
 
-    coordinates = np.zeros((len(points), 2))
-    dcoordinates = np.zeros((len(points), 2))
+    coordinates = np.zeros((2, points.shape[-1]))
+    dcoordinates = np.zeros_like(coordinates)
 
     for _ in range(maxiter):
-        h, dhdr = shape_function_quad(coordinates)
+        h = QUAD.function(coordinates)
+        dhdr = QUAD.gradient(coordinates)
 
-        # batched matrix products are used instead of einsum for performance reasons
-        x = (h[:, None, :] @ vertices)[:, 0]
-        a = dhdr.transpose(0, 2, 1) @ vertices
+        x = np.einsum("ap,aip->ip", h, vertices)
+        a = np.einsum("aJp,aip->Jip", dhdr, vertices)
         d = points - x
 
         # negative gradient of the objective function
-        fun = (a @ d[:, :, None])[:, :, 0]
+        fun = dot(a, d, mode=(2, 1))
 
         # hessian of the objective function and its Gauss-Newton approximation
-        metric = a @ a.transpose(0, 2, 1)
+        metric = dot(a, transpose(a))
         hessian = metric.copy()
-        ddadr = np.sum(d * dadr, axis=-1)
-        hessian[:, 0, 1] -= ddadr
-        hessian[:, 1, 0] -= ddadr
+        ddadr = dot(d, dadr, mode=(1, 1))
+        hessian[0, 1] -= ddadr
+        hessian[1, 0] -= ddadr
 
         # use the Gauss-Newton approximation if the hessian is not positive definite
-        determinant = (
-            hessian[:, 0, 0] * hessian[:, 1, 1] - hessian[:, 0, 1] * hessian[:, 1, 0]
-        )
-        definite = (determinant > 0) & (hessian[:, 0, 0] > 0)
-        hessian = np.where(definite[:, None, None], hessian, metric)
+        definite = (det(hessian) > 0) & (hessian[0, 0] > 0)
+        hessian = np.where(definite, hessian, metric)
 
-        dcoordinates = solve_2x2(hessian, fun)
+        # the determinant of a singular system is regularized, the affected pairs are
+        # filtered out by the convergence-check
+        determinant = det(hessian)
+        np.copyto(determinant, 1.0, where=np.abs(determinant) < np.finfo(float).tiny)
+
+        dcoordinates = dot(inv(hessian, determinant=determinant), fun, mode=(2, 1))
 
         # limit the step size (trust region) and the range of the natural element
         # coordinates: only projections inside (or close to) a face are used
@@ -227,7 +183,7 @@ def closest_point_projection(points, vertices, maxiter=12, tol=1e-10):
         if np.all(np.abs(dcoordinates) < tol):
             break
 
-    return coordinates, np.all(np.abs(dcoordinates) < np.sqrt(tol), axis=1)
+    return coordinates, np.all(np.abs(dcoordinates) < np.sqrt(tol), axis=0)
 
 
 class ContactSurfacePair:
@@ -249,7 +205,15 @@ class ContactSurfacePair:
 
     Notes
     -----
-    This class is used internally by :class:`~felupe.SolidBodyContact`.
+    This class is used internally by :class:`~felupe_contact.SolidBodyContact`.
+
+    All arrays are evaluated in the array-layout of FElupe: the axes of the shape
+    functions ``a``, of the components ``i`` and of the natural element coordinates
+    ``J`` are the leading axes and the batch-axes are the trailing axes. Hence the
+    quantities of the face-pairs ``p`` are given as ``h_ap``, ``n_ip`` or ``a_Jip``.
+    This is the layout of :class:`~felupe.Quad` and of the functions of
+    :mod:`felupe.math`, it broadcasts the scalar-valued quantities of the face-pairs
+    without a reshape and it is faster than a layout with leading batch-axes.
     """
 
     def __init__(self, field, field_primary, weight=1.0):
@@ -278,10 +242,15 @@ class ContactSurfacePair:
         self.cells_faces_primary = region_primary.mesh.cells_faces
         self.h = np.ascontiguousarray(region.h[:4, :, 0])
 
+        # a field with the deformed coordinates of the points of the mesh, which are
+        # interpolated at the integration points of the faces of the secondary surface
+        self.deformed = Field(region, dim=region.mesh.dim, values=region.mesh.points)
+
         # differential area of the secondary surface (reference configuration), the
         # weights of the quadrature scheme are already included
         self.dV = region.dV
         self.ncells = self.dV.shape[1]
+        self.ncells_primary = len(self.cells_faces_primary)
 
         # the orientation of the vertices of the faces of a boundary region is not
         # necessarily aligned with the outward unit normal vectors of the region
@@ -319,16 +288,32 @@ class ContactSurfacePair:
     def _init_orientation(self, region):
         "Return the orientation of the faces w.r.t. the outward unit normal vectors."
 
-        vertices = region.mesh.points[region.mesh.cells_faces]
-        normal = np.cross(
-            vertices[:, 1] - vertices[:, 0], vertices[:, 3] - vertices[:, 0]
-        )
+        vertices = self.vertices(region.mesh.points, region.mesh.cells_faces)
 
-        # unit normal vectors of the boundary region, evaluated at the first
-        # quadrature point of each face
-        normals = region.normals[:, 0, :].T
+        # the outward unit normal vectors of the boundary region, evaluated at the
+        # first quadrature point of each face, define the orientation of a face
+        normal = cross(vertices[1] - vertices[0], vertices[3] - vertices[0])
 
-        return np.sign(np.einsum("mi,mi->m", normal, normals))
+        return np.sign(dot(normal, region.normals[:, 0], mode=(1, 1)))
+
+    @staticmethod
+    def vertices(x, cells_faces):
+        """Return the coordinates of the vertices of faces.
+
+        Parameters
+        ----------
+        x : ndarray of shape (npoints, 3)
+            The coordinates of all points of the mesh.
+        cells_faces : ndarray of shape (ncells, 4)
+            The point-connectivity of the faces.
+
+        Returns
+        -------
+        ndarray of shape (4, 3, ncells)
+            The coordinates of the vertices of the faces.
+        """
+
+        return np.ascontiguousarray(x[cells_faces].transpose(1, 2, 0))
 
     def normals(self, x):
         """Return the outward unit normal vectors of the faces of the secondary
@@ -341,17 +326,15 @@ class ContactSurfacePair:
 
         Returns
         -------
-        ndarray of shape (ncells, 3)
+        ndarray of shape (3, ncells)
             The outward unit normal vectors of the faces.
         """
 
-        vertices = x[self.cells_faces]
-        normals = np.cross(
-            vertices[:, 1] - vertices[:, 0], vertices[:, 3] - vertices[:, 0]
-        )
-        normals *= self.orientation[:, None]
+        vertices = self.vertices(x, self.cells_faces)
 
-        return normals / np.linalg.norm(normals, axis=1)[:, None]
+        return unit_normals(
+            vertices[1] - vertices[0], vertices[3] - vertices[0], self.orientation
+        )
 
     def kinematics(
         self, x, max_distance, candidates, tolerance, facing, self_contact, workers=1
@@ -390,15 +373,17 @@ class ContactSurfacePair:
         """
 
         # deformed coordinates of the integration points of the secondary surface
-        points = np.einsum("aq,cai->qci", self.h, x[self.cells_faces]).reshape(-1, 3)
+        self.deformed.values = x
+        points = self.deformed.interpolate().reshape(3, -1)
 
         # deformed coordinates of the vertices of the faces of the primary surface
-        vertices = x[self.cells_faces_primary]
+        vertices = self.vertices(x, self.cells_faces_primary)
 
         # broad-phase contact search: find the nearest faces of the primary surface by
-        # a tree-query on the face centers
-        center = vertices.mean(axis=1)
-        radius = np.linalg.norm(vertices - center[:, None], axis=2).max(axis=1)
+        # a tree-query on the face centers. the tree operates on point-arrays with the
+        # coordinates on the trailing axis
+        center = vertices.mean(axis=0)
+        radius = norm(vertices - center, axis=1).max(axis=0)
 
         # the tree-query is carried out per body of the primary surface, where the
         # faces of the own body of an integration point are skipped. otherwise the
@@ -406,10 +391,11 @@ class ContactSurfacePair:
         # candidates of a query and hide the faces of the other bodies. this is
         # essential if the contact surfaces are not restricted to the region of
         # interest, e.g. if all faces on the outline of a mesh are used
+        npoints = points.shape[-1]
         if self_contact:
-            groups = [(np.arange(len(points)), np.arange(len(center)))]
+            groups = [(np.arange(npoints), np.arange(self.ncells_primary))]
         else:
-            body = np.tile(self.body, len(points) // self.ncells)
+            body = np.tile(self.body, npoints // self.ncells)
             groups = [
                 (np.flatnonzero(body != b), np.flatnonzero(self.body_primary == b))
                 for b in np.unique(self.body_primary)
@@ -420,9 +406,9 @@ class ContactSurfacePair:
             if len(rows) == 0 or len(cols) == 0:
                 continue
 
-            tree = cKDTree(center[cols])
+            tree = cKDTree(center[:, cols].T)
             k = min(candidates, len(cols))
-            distance, nearest = tree.query(points[rows], k=k, workers=workers)
+            distance, nearest = tree.query(points[:, rows].T, k=k, workers=workers)
 
             distance = distance.reshape(len(rows), k)
             nearest = cols[nearest.reshape(len(rows), k)]
@@ -441,34 +427,33 @@ class ContactSurfacePair:
             return None
 
         # narrow-phase contact search: closest-point projection
-        vertices_face = vertices[face]
-        coordinates, converged = closest_point_projection(points[point], vertices_face)
+        vertices_face = vertices[..., face]
+        coordinates, converged = closest_point_projection(
+            points[:, point], vertices_face
+        )
 
-        h, dhdr = shape_function_quad(coordinates)
+        h = QUAD.function(coordinates)
+        dhdr = QUAD.gradient(coordinates)
 
-        xp = (h[:, None, :] @ vertices_face)[:, 0]
-        a = dhdr.transpose(0, 2, 1) @ vertices_face
-        dadr = D2HDRDS @ vertices_face
+        xp = np.einsum("ap,aip->ip", h, vertices_face)
+        a = np.einsum("aJp,aip->Jip", dhdr, vertices_face)
+        dadr = np.einsum("a,aip->ip", D2HDRDS, vertices_face)
 
-        normal = np.cross(a[:, 0], a[:, 1])
-        normal *= self.orientation_primary[face][:, None]
-        normal /= np.linalg.norm(normal, axis=1)[:, None]
+        normal = unit_normals(a[0], a[1], self.orientation_primary[face])
 
-        d = points[point] - xp
-        gap = np.sum(d * normal, axis=-1)
+        d = points[:, point] - xp
+        gap = dot(d, normal, mode=(1, 1))
 
         # the metric and the curvature of the primary surface. the modified metric
         # H = a - g * kappa is positive definite as long as the penetration is smaller
         # than the radius of curvature of the primary surface. only in this case, the
         # projection is a (local) minimum of the distance
-        metric = a @ a.transpose(0, 2, 1)
-        curvature = np.zeros((len(point), 2, 2))
-        curvature[:, 0, 1] = curvature[:, 1, 0] = np.sum(normal * dadr, axis=-1)
+        metric = dot(a, transpose(a))
+        curvature = np.zeros((2, 2, len(point)))
+        curvature[0, 1] = curvature[1, 0] = dot(normal, dadr, mode=(1, 1))
 
-        H = metric - gap[:, None, None] * curvature
-        minimum = (H[:, 0, 0] * H[:, 1, 1] - H[:, 0, 1] * H[:, 1, 0] > 0) & (
-            H[:, 0, 0] > 0
-        )
+        H = metric - gap * curvature
+        minimum = (det(H) > 0) & (H[0, 0] > 0)
 
         # faces which share at least one point are neighbours and must not be in
         # contact. this also removes the projections of a face on itself, which occur
@@ -485,7 +470,7 @@ class ContactSurfacePair:
         # which is located around a corner, as a valid contact partner. this occurs if
         # the contact surfaces are not restricted to the region of interest, e.g. if
         # all faces on the outline of a mesh are used
-        opposed = np.sum(self.normals(x)[cell] * normal, axis=-1) < -facing
+        opposed = dot(self.normals(x)[:, cell], normal, mode=(1, 1)) < -facing
 
         # the face of the previous evaluation is released with a doubled tolerance.
         # this hysteresis prevents an oscillating activation of integration points
@@ -495,7 +480,7 @@ class ContactSurfacePair:
 
         # a projection is only valid if it is located inside a face of the primary
         # surface and if the (signed) distance is within the search distance
-        inside = np.all(np.abs(coordinates) <= 1 + released[:, None], axis=1)
+        inside = np.all(np.abs(coordinates) <= 1 + released, axis=0)
         valid = (
             converged
             & minimum
@@ -515,9 +500,9 @@ class ContactSurfacePair:
         # essential: a criterion which is based on the gap is ambiguous for integration
         # points which are located near the edges of the faces of the primary surface
         # and leads to an oscillating face-assignment between the iterations
-        hc = shape_function_quad(np.clip(coordinates, -1.0, 1.0))[0]
-        distance = np.linalg.norm(
-            points[point] - (hc[:, None, :] @ vertices_face)[:, 0], axis=1
+        hc = QUAD.function(np.clip(coordinates, -1.0, 1.0))
+        distance = norm(
+            points[:, point] - np.einsum("ap,aip->ip", hc, vertices_face), axis=0
         )
 
         score = np.where(valid, distance, np.inf)
@@ -537,9 +522,9 @@ class ContactSurfacePair:
         best = best[valid[best]]
 
         point, face = point[best], face[best]
-        gap, normal, a = gap[best], normal[best], a[best]
-        metric, curvature = metric[best], curvature[best]
-        h, dhdr = h[best], dhdr[best]
+        gap, normal, a = gap[best], normal[..., best], a[..., best]
+        metric, curvature = metric[..., best], curvature[..., best]
+        h, dhdr = h[..., best], dhdr[..., best]
 
         # store the face-assignment for the next evaluation
         self.face[:] = -1
@@ -568,13 +553,13 @@ class ContactSurfacePair:
 
         Returns
         -------
-        b : list of ndarray of shape (npairs, 12)
+        b : list of ndarray of shape (12, npairs)
             The variation of the gap :math:`\delta g = \boldsymbol{b} \cdot \delta
             \boldsymbol{u}` for the secondary and the primary surface.
-        A : ndarray of shape (npairs, 2, 12)
+        A : ndarray of shape (2, 12, npairs)
             The variation :math:`A_\alpha = \boldsymbol{n} \cdot \delta
             \boldsymbol{a}_\alpha` of the primary surface.
-        B : list of ndarray of shape (npairs, 2, 12)
+        B : list of ndarray of shape (2, 12, npairs)
             The variation :math:`B_\alpha = \boldsymbol{a}_\alpha \cdot \delta
             \boldsymbol{d}` for the secondary and the primary surface.
 
@@ -595,26 +580,26 @@ class ContactSurfacePair:
         normal = kinematics["normal"]
         tangents = kinematics["tangents"]
 
-        q, c = np.divmod(point, self.ncells)
+        q = point // self.ncells
+        npairs = len(point)
 
         # shape functions of the secondary (h) and the primary (hp) faces
-        h = self.h[:, q].T
+        h = self.h[:, q]
         hp = kinematics["h"]
         dhdr = kinematics["dhdr"]
 
-        npairs = len(point)
-
+        # the twelve degrees of freedom of a face are the three components "i" of the
+        # displacements of its four points "a", hence the dyadic products of the shape
+        # functions and the vector-valued quantities are reshaped to a flat dof-axis
         b = [
-            (h[:, :, None] * normal[:, None, :]).reshape(npairs, 12),
-            (-hp[:, :, None] * normal[:, None, :]).reshape(npairs, 12),
+            dya(h, normal, mode=1).reshape(12, npairs),
+            -dya(hp, normal, mode=1).reshape(12, npairs),
         ]
         B = [
-            (h[:, None, :, None] * tangents[:, :, None, :]).reshape(npairs, 2, 12),
-            (-hp[:, None, :, None] * tangents[:, :, None, :]).reshape(npairs, 2, 12),
+            np.einsum("ap,Jip->Jaip", h, tangents).reshape(2, 12, npairs),
+            -np.einsum("ap,Jip->Jaip", hp, tangents).reshape(2, 12, npairs),
         ]
-        A = (dhdr.transpose(0, 2, 1)[:, :, :, None] * normal[:, None, None, :]).reshape(
-            npairs, 2, 12
-        )
+        A = np.einsum("aJp,ip->Jaip", dhdr, normal).reshape(2, 12, npairs)
 
         return b, A, B
 
@@ -658,7 +643,7 @@ class ContactSurfacePair:
         # secondary surface: the traction at the integration points of the faces is
         # integrated by a weak form
         traction = np.zeros((3, *self.dV.shape))
-        traction[:, q, c] = self.weight * gradient * normal.T
+        traction[:, q, c] = self.weight * gradient * normal
 
         force = IntegralForm(
             fun=[traction], v=self.field, dV=self.dV, grad_v=[False]
@@ -666,13 +651,10 @@ class ContactSurfacePair:
 
         # primary surface: the traction is evaluated at the projected points
         dA = self.weight * self.dV[q, c] * gradient
-        values = -dA[:, None, None] * kinematics["h"][:, :, None] * normal[:, None, :]
+        values = -dA * dya(kinematics["h"], normal, mode=1)
         rows = self.dof[self.cells_faces_primary[kinematics["face"]]]
 
-        force += csr_matrix(
-            (values.ravel(), (rows.ravel(), np.zeros(rows.size, dtype=int))),
-            shape=(self.ndof, 1),
-        )
+        force += self._assemble(values, rows)
 
         return force
 
@@ -731,21 +713,22 @@ class ContactSurfacePair:
         q, c = np.divmod(point, self.ncells)
         dA = self.weight * self.dV[q, c]
 
-        # inverse of the modified metric and the curvature-related fourth-order term
-        inverse_metric = invert_2x2(metric)
-        inverse_H = invert_2x2(metric - gap[:, None, None] * curvature)
-        M = np.einsum("pJK,pKL,pLM->pJM", inverse_metric, curvature, inverse_H)
+        # inverse of the modified metric and the curvature-related fourth-order term.
+        # both the metric and the modified metric are positive definite, this is
+        # ensured by the contact search
+        inverse_metric = inv(metric)
+        inverse_H = inv(metric - gap * curvature)
+        M = dot(dot(inverse_metric, curvature), inverse_H)
 
         # secondary surface: the (symmetric) block of the stiffness matrix, which
         # contains only test- and trial-functions of the secondary surface, is
         # assembled by a weak form
         elasticity = np.zeros((3, 3, *self.dV.shape))
-        elasticity[:, :, q, c] = self.weight * (
-            hessian * np.einsum("pi,pj->ijp", normal, normal)
-        )
+        elasticity[:, :, q, c] = self.weight * hessian * dya(normal, normal, mode=1)
+
         if geometric:
             elasticity[:, :, q, c] -= self.weight * (
-                gradient * np.einsum("pJK,pJi,pKj->ijp", M, tangents, tangents)
+                gradient * np.einsum("JKp,Jip,Kjp->ijp", M, tangents, tangents)
             )
 
         stiffness = IntegralForm(
@@ -761,30 +744,30 @@ class ContactSurfacePair:
         b, A, B = self.variations(kinematics)
 
         # material part
-        Ksm = hessian[:, None, None] * b[0][:, :, None] * b[1][:, None, :]
-        Kmm = hessian[:, None, None] * b[1][:, :, None] * b[1][:, None, :]
+        Ksm = hessian * dya(b[0], b[1], mode=1)
+        Kmm = hessian * dya(b[1], b[1], mode=1)
 
         if geometric:
-            HA = np.einsum("pJK,pKi->pJi", inverse_H, A)
-            MB = [np.einsum("pJK,pKi->pJi", M, Bi) for Bi in B]
+            HA = dot(inverse_H, A)
+            MB = [dot(M, Bi) for Bi in B]
 
             # geometric part of the secondary-primary coupling block
-            Ksm -= gradient[:, None, None] * (
-                np.einsum("pJi,pJj->pij", B[0], HA)
-                + np.einsum("pJi,pJj->pij", MB[0], B[1])
+            Ksm -= gradient * (
+                np.einsum("Jip,Jjp->ijp", B[0], HA)
+                + np.einsum("Jip,Jjp->ijp", MB[0], B[1])
             )
 
             # geometric part of the primary-primary block
-            T = np.einsum("pJi,pJj->pij", HA, B[1])
-            Kmm -= gradient[:, None, None] * (
+            T = np.einsum("Jip,Jjp->ijp", HA, B[1])
+            Kmm -= gradient * (
                 T
-                + T.transpose(0, 2, 1)
-                + gap[:, None, None] * np.einsum("pJi,pJj->pij", HA, A)
-                + np.einsum("pJi,pJj->pij", MB[1], B[1])
+                + transpose(T)
+                + gap * np.einsum("Jip,Jjp->ijp", HA, A)
+                + np.einsum("Jip,Jjp->ijp", MB[1], B[1])
             )
 
-        Ksm *= dA[:, None, None]
-        Kmm *= dA[:, None, None]
+        Ksm *= dA
+        Kmm *= dA
 
         rows = self.dof[self.cells_faces[c]].reshape(-1, 12)
         cols = self.dof[self.cells_faces_primary[kinematics["face"]]].reshape(-1, 12)
@@ -794,8 +777,36 @@ class ContactSurfacePair:
 
         return stiffness
 
-    def _assemble(self, values, rows, cols):
-        "Return a sparse matrix, assembled from dense sub-matrices of face-pairs."
+    def _assemble(self, values, rows, cols=None):
+        """Return a sparse vector or matrix, assembled from the dense sub-vectors or
+        sub-matrices of the face-pairs. The values are given in the array-layout of
+        FElupe, i.e. with the face-pairs on the trailing axis.
+
+        Parameters
+        ----------
+        values : ndarray of shape (..., npairs)
+            The dense sub-vectors or sub-matrices of the face-pairs.
+        rows : ndarray of shape (npairs, ...)
+            The row-indices of the degrees of freedom of the face-pairs.
+        cols : ndarray of shape (npairs, ...) or None, optional
+            The column-indices of the degrees of freedom of the face-pairs. If None, a
+            sparse vector is assembled (default is None).
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            The assembled sparse vector or matrix.
+        """
+
+        # move the axis of the face-pairs to the front, as it is done in the assembly
+        # of an integral form
+        values = np.moveaxis(values, -1, 0)
+
+        if cols is None:
+            return csr_matrix(
+                (values.ravel(), (rows.ravel(), np.zeros(rows.size, dtype=int))),
+                shape=(self.ndof, 1),
+            )
 
         return csr_matrix(
             (
@@ -1042,8 +1053,7 @@ class SolidBodyContact:
 
     See Also
     --------
-    felupe.ContactRigidPlane : A node-to-surface contact, where the surface is given by
-        a rigid plane.
+    felupe.MultiPointContact : A frictionless point-to-rigid (wall) contact.
     """
 
     def __init__(
