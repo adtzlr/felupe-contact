@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file. The format 
   are opposed and if both faces belong to different bodies of the mesh. This makes it
   possible to use all faces on the outline of a mesh as contact surfaces, i.e. without
   restricting the boundary regions to the region of interest.
+- Added a test suite in `tests/`, which covers the package by 100%.
 
 ### Fixed
 - Fixed the package metadata: the project is named `felupe-contact` and its version is
