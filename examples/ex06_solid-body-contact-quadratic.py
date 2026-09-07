@@ -70,4 +70,4 @@ print(contact.results.npoints_in_contact)
 # %%
 # The principal values of the Cauchy stress are available in the solid body
 # and can be plotted.
-solid.plot("Principal Values of Cauchy Stress").show()
+solid.plot("Principal Values of Cauchy Stress", nonlinear_subdivision=2).show()
