@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 profile = "black"
 
 [project]
-name = "felupe"
+name = "felupe-contact"
 description = "Contact Extension-package for FElupe."
 readme = "README.md"
 authors = [
@@ -60,9 +60,10 @@ docs = [
     "sphinx-inline-tabs",
     "pypandoc",
 ]
+all = ["felupe[all]"]
 
 [dependency-groups]
-read-the-docs = ["felupe[all,docs,examples]"]
+read-the-docs = ["felupe-contact[docs]", "felupe[all,docs,examples]"]
 
 [[tool.uv.index]]
 name = "pypi"
@@ -79,7 +80,7 @@ torch = {index = "pytorch-cpu"}
 torchvision = {index = "pytorch-cpu"}
 
 [tool.setuptools.dynamic]
-version = {attr = "felupe.__about__.__version__"}
+version = {attr = "felupe_contact.__about__.__version__"}
 
 [project.urls]
 Homepage = "https://felupe-contact.readthedocs.io/en/latest"

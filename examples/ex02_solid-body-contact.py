@@ -9,13 +9,11 @@ Compared to Ex. 1, all faces of the mesh are used as contact surfaces.
 
 # sphinx_gallery_thumbnail_number = -1
 import felupe as fem
+
 from felupe_contact import SolidBodyContact
 
 # %%
 #
-import felupe as fem
-import numpy as np
-
 bottom = fem.Cube(a=(0, 0, 0), b=(1, 1, 1), n=(4, 4, 3))
 top = fem.Cube(a=(0.15, 0.15, 1.02), b=(0.85, 0.85, 1.62), n=(3, 3, 3))
 container = fem.MeshContainer([bottom, top], merge=True)
@@ -26,19 +24,13 @@ field = fem.FieldContainer([fem.Field(region, dim=3)])
 solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
 
 # %%
-# The contact surfaces are created as boundary regions on the same mesh. All faces on
-# the outline of the mesh which are located in the region of interest are used.
-mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
+# The contact surfaces are created as boundary regions on the same mesh. In contrast to
+# Ex. 1, no mask is used: all faces on the outline of the mesh are contact surfaces. The
+# contact search discards the face-pairs which are not able to touch each other, i.e.
+# the faces which belong to the same body and the faces which are located around a
+# corner.
 secondary = fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(mesh), dim=3)])
-mask_primary = np.isclose(mesh.z, 1.0)
-primary = fem.FieldContainer(
-    [
-        fem.Field(
-            fem.RegionHexahedronBoundary(mesh),
-            dim=3,
-        )
-    ]
-)
+primary = fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(mesh), dim=3)])
 contact = SolidBodyContact(secondary, primary, items=[solid])
 
 # %%
@@ -59,7 +51,9 @@ job = fem.Job(steps=[step]).evaluate(verbose=0)
 
 # %%
 # The number of integration points which are in contact and the penalty stiffness,
-# which is estimated from the given items, are available in the contact object.
+# which is estimated from the given items, are available in the contact object. Both
+# faces of the contact zone are used as secondary surfaces here, hence twice the number
+# of integration points of Ex. 1 are in contact.
 print(contact.results.npoints_in_contact)
 
 # %%

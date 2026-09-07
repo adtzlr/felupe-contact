@@ -16,8 +16,11 @@ You should have received a copy of the GNU General Public License
 along with FElupe.  If not, see <http://www.gnu.org/licenses/>.
 """
 
+import warnings
+
 import numpy as np
-from scipy.sparse import csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
 from felupe import IntegralForm
@@ -104,6 +107,36 @@ def invert_2x2(matrix):
     )
 
     return inverse / determinant[..., None, None]
+
+
+def connected_bodies(cells, npoints):
+    """Return the labels of the connected bodies for the points of a mesh. Two points
+    belong to the same body if they are connected by a path of cells.
+
+    Parameters
+    ----------
+    cells : ndarray of shape (ncells, npoints_per_cell)
+        The point-connectivity of the cells of a mesh.
+    npoints : int
+        The number of points of the mesh.
+
+    Returns
+    -------
+    ndarray of shape (npoints,)
+        The label of the body of each point of the mesh. Points which are not connected
+        to any cell are labelled individually.
+    """
+
+    # it is sufficient to connect the points of a cell to its first point: this results
+    # in the same connected components as a fully-connected cell
+    rows = np.repeat(cells[:, 0], cells.shape[1] - 1)
+    cols = cells[:, 1:].ravel()
+
+    graph = coo_matrix(
+        (np.ones(len(rows), dtype=bool), (rows, cols)), shape=(npoints, npoints)
+    )
+
+    return connected_components(graph, directed=False, return_labels=True)[1]
 
 
 def closest_point_projection(points, vertices, maxiter=12, tol=1e-10):
@@ -252,13 +285,23 @@ class ContactSurfacePair:
 
         # the orientation of the vertices of the faces of a boundary region is not
         # necessarily aligned with the outward unit normal vectors of the region
-        self.orientation = self._init_orientation(region_primary)
+        self.orientation = self._init_orientation(region)
+        self.orientation_primary = self._init_orientation(region_primary)
 
         # characteristic size of the faces of both surfaces
         self.size = min(
             np.sqrt(region.dV.sum(axis=0).mean()),
             np.sqrt(region_primary.dV.sum(axis=0).mean()),
         )
+
+        # the connected bodies of the mesh: two faces which belong to the same body
+        # are never in contact, unless self-contact is considered
+        labels = connected_bodies(
+            np.vstack([region.mesh.cells, region_primary.mesh.cells]),
+            region.mesh.npoints,
+        )
+        self.body = labels[self.cells_faces[:, 0]]
+        self.body_primary = labels[self.cells_faces_primary[:, 0]]
 
         self.points = np.unique(self.cells_faces)
         self.points_primary = np.unique(self.cells_faces_primary)
@@ -287,7 +330,32 @@ class ContactSurfacePair:
 
         return np.sign(np.einsum("mi,mi->m", normal, normals))
 
-    def kinematics(self, x, max_distance, candidates, tolerance, workers=1):
+    def normals(self, x):
+        """Return the outward unit normal vectors of the faces of the secondary
+        surface, evaluated at the deformed coordinates of their vertices.
+
+        Parameters
+        ----------
+        x : ndarray of shape (npoints, 3)
+            The deformed coordinates of all points of the mesh.
+
+        Returns
+        -------
+        ndarray of shape (ncells, 3)
+            The outward unit normal vectors of the faces.
+        """
+
+        vertices = x[self.cells_faces]
+        normals = np.cross(
+            vertices[:, 1] - vertices[:, 0], vertices[:, 3] - vertices[:, 0]
+        )
+        normals *= self.orientation[:, None]
+
+        return normals / np.linalg.norm(normals, axis=1)[:, None]
+
+    def kinematics(
+        self, x, max_distance, candidates, tolerance, facing, self_contact, workers=1
+    ):
         r"""Return the contact kinematics, evaluated at the integration points of the
         faces of the secondary surface.
 
@@ -305,6 +373,12 @@ class ContactSurfacePair:
             The tolerance for the natural element coordinates of the projected points.
             A projection is only valid if the coordinates are within
             ``[-1 - tolerance, 1 + tolerance]``.
+        facing : float
+            The minimum opposition of the outward unit normal vectors of a face-pair. A
+            projection is only valid if
+            :math:`\boldsymbol{n} \cdot \boldsymbol{n}_{primary} < -facing`.
+        self_contact : bool
+            Flag to consider face-pairs which belong to the same body of the mesh.
         workers : int, optional
             The number of workers used for the tree-query (default is 1).
 
@@ -326,19 +400,42 @@ class ContactSurfacePair:
         center = vertices.mean(axis=1)
         radius = np.linalg.norm(vertices - center[:, None], axis=2).max(axis=1)
 
-        tree = cKDTree(center)
-        k = min(candidates, len(center))
-        distance, face = tree.query(points, k=k, workers=workers)
+        # the tree-query is carried out per body of the primary surface, where the
+        # faces of the own body of an integration point are skipped. otherwise the
+        # faces of the own body, which are always the closest ones, would occupy the
+        # candidates of a query and hide the faces of the other bodies. this is
+        # essential if the contact surfaces are not restricted to the region of
+        # interest, e.g. if all faces on the outline of a mesh are used
+        if self_contact:
+            groups = [(np.arange(len(points)), np.arange(len(center)))]
+        else:
+            body = np.tile(self.body, len(points) // self.ncells)
+            groups = [
+                (np.flatnonzero(body != b), np.flatnonzero(self.body_primary == b))
+                for b in np.unique(self.body_primary)
+            ]
 
-        distance = distance.reshape(len(points), k)
-        face = face.reshape(len(points), k)
+        point, face = [], []
+        for rows, cols in groups:
+            if len(rows) == 0 or len(cols) == 0:
+                continue
 
-        # discard pairs which are too far away
-        mask = distance <= radius[face] + max_distance
-        point = np.broadcast_to(np.arange(len(points))[:, None], (len(points), k))
+            tree = cKDTree(center[cols])
+            k = min(candidates, len(cols))
+            distance, nearest = tree.query(points[rows], k=k, workers=workers)
 
-        point = point[mask]
-        face = face[mask]
+            distance = distance.reshape(len(rows), k)
+            nearest = cols[nearest.reshape(len(rows), k)]
+
+            # discard pairs which are too far away
+            mask = distance <= radius[nearest] + max_distance
+
+            point.append(np.broadcast_to(rows[:, None], mask.shape)[mask])
+            face.append(nearest[mask])
+
+        empty = np.zeros(0, dtype=int)
+        point = np.concatenate(point) if point else empty
+        face = np.concatenate(face) if face else empty
 
         if len(point) == 0:
             return None
@@ -354,7 +451,7 @@ class ContactSurfacePair:
         dadr = D2HDRDS @ vertices_face
 
         normal = np.cross(a[:, 0], a[:, 1])
-        normal *= self.orientation[face][:, None]
+        normal *= self.orientation_primary[face][:, None]
         normal /= np.linalg.norm(normal, axis=1)[:, None]
 
         d = points[point] - xp
@@ -376,11 +473,19 @@ class ContactSurfacePair:
         # faces which share at least one point are neighbours and must not be in
         # contact. this also removes the projections of a face on itself, which occur
         # if the masks of both boundary regions are overlapping
-        cells = self.cells_faces[point % self.ncells]
+        cell = point % self.ncells
+        cells = self.cells_faces[cell]
         neighbour = np.any(
             cells[:, :, None] == self.cells_faces_primary[face][:, None, :],
             axis=(1, 2),
         )
+
+        # two faces are only able to touch each other if their outward unit normal
+        # vectors are opposed. without this criterion, a face detects another face,
+        # which is located around a corner, as a valid contact partner. this occurs if
+        # the contact surfaces are not restricted to the region of interest, e.g. if
+        # all faces on the outline of a mesh are used
+        opposed = np.sum(self.normals(x)[cell] * normal, axis=-1) < -facing
 
         # the face of the previous evaluation is released with a doubled tolerance.
         # this hysteresis prevents an oscillating activation of integration points
@@ -395,6 +500,7 @@ class ContactSurfacePair:
             converged
             & minimum
             & inside
+            & opposed
             & ~neighbour
             & (gap < 0)
             & (gap > -max_distance)
@@ -753,6 +859,16 @@ class SolidBodyContact:
         The relative tolerance for the natural element coordinates of the projected
         points (default is 0.1). A projection is valid if its coordinates are within
         ``[-1 - tolerance, 1 + tolerance]``.
+    facing : float, optional
+        The minimum opposition of the outward unit normal vectors of a face-pair
+        (default is 0.1). Two faces are only able to touch each other if
+        :math:`\boldsymbol{n} \cdot \boldsymbol{n}_{primary} < -facing`, i.e. if
+        their outward unit normal vectors are opposed. A value of -1.0 deactivates this
+        criterion.
+    self_contact : bool, optional
+        Flag to consider face-pairs which belong to the same body of the mesh (default
+        is False). The bodies of a mesh are identified by their point-connectivity: two
+        faces belong to the same body if they are connected by a path of cells.
     geometric_stiffness : bool, optional
         Flag to add the geometric part of the contact stiffness matrix (default is
         True). This is required for a quadratic rate of convergence.
@@ -821,13 +937,18 @@ class SolidBodyContact:
             \frac{\bar{k}}{\bar{a}},\ \frac{\bar{k}_{primary}}{\bar{a}_{primary}}
         \right)}
 
+    A face-pair is only considered by the contact search if it is able to touch: faces
+    which share at least one point are neighbours and are never in contact, faces which
+    belong to the same body are only in contact if ``self_contact=True`` and the
+    outward unit normal vectors of both faces must be opposed, see ``facing``. Without
+    these criteria, a face would detect another face of its own body, which is located
+    on the opposite side of the body or around a corner, as a valid contact partner.
+
     ..  note::
 
         The mesh of both boundary regions must be the same mesh as the mesh of the
         region of the solid bodies. Two separate meshes are combined by
-        :meth:`MeshContainer.stack() <felupe.MeshContainer.stack>`. Both contact
-        surfaces must be disjoint, i.e. they must not share any points. Faces which
-        share at least one point are treated as neighbours and are never in contact.
+        :meth:`MeshContainer.stack() <felupe.MeshContainer.stack>`.
 
     ..  hint::
 
@@ -835,6 +956,14 @@ class SolidBodyContact:
         softer and finer meshed surface as the secondary surface, e.g. the rubber
         surface of a rubber-to-metal contact. Alternatively, use ``two_pass=True``,
         which removes this bias but requires about twice the evaluation time.
+
+    ..  hint::
+
+        The contact surfaces do not need to be restricted to the region of interest: if
+        all faces on the outline of a mesh are used, the contact is evaluated on both
+        surfaces of a contact zone. This doubles the contact potential, i.e. it acts
+        like a two-pass contact without its scale factors, and hence ``two_pass=True``
+        is redundant in this case.
 
     Examples
     --------
@@ -846,6 +975,8 @@ class SolidBodyContact:
 
         >>> import felupe as fem
         >>> import numpy as np
+        >>>
+        >>> from felupe_contact import SolidBodyContact
         >>>
         >>> bottom = fem.Cube(a=(0, 0, 0), b=(1, 1, 1), n=(4, 4, 3))
         >>> top = fem.Cube(a=(0.15, 0.15, 1.02), b=(0.85, 0.85, 1.62), n=(3, 3, 3))
@@ -873,7 +1004,7 @@ class SolidBodyContact:
         ...         dim=3,
         ...     )]
         ... )
-        >>> contact = fem.SolidBodyContact(secondary, primary, items=[solid])
+        >>> contact = SolidBodyContact(secondary, primary, items=[solid])
 
     The bottom face of the lower block is fixed and the top face of the upper block is
     moved downwards.
@@ -927,6 +1058,8 @@ class SolidBodyContact:
         max_distance=None,
         candidates=8,
         tolerance=0.1,
+        facing=0.1,
+        self_contact=False,
         geometric_stiffness=True,
     ):
         self.field = field
@@ -938,6 +1071,8 @@ class SolidBodyContact:
         self.two_pass = two_pass
         self.candidates = candidates
         self.tolerance = tolerance
+        self.facing = facing
+        self.self_contact = self_contact
         self.geometric_stiffness = geometric_stiffness
 
         if items is None and penalty is None:
@@ -952,6 +1087,16 @@ class SolidBodyContact:
             ]
 
         self.size = self.pairs[0].size
+
+        # all faces of both contact surfaces belong to the same body: the contact search
+        # discards every face-pair and hence no contact is ever detected
+        pair = self.pairs[0]
+        if not self_contact and len(np.union1d(pair.body, pair.body_primary)) == 1:
+            warnings.warn(
+                "All faces of both contact surfaces belong to the same body of the "
+                "mesh, hence no contact will be detected. Use `self_contact=True` to "
+                "consider face-pairs which belong to the same body."
+            )
 
         self.smoothing = smoothing
         if smoothing is None:
@@ -1080,6 +1225,8 @@ class SolidBodyContact:
                 max_distance=self.max_distance,
                 candidates=self.candidates,
                 tolerance=self.tolerance,
+                facing=self.facing,
+                self_contact=self.self_contact,
                 workers=-1 if parallel else 1,
             )
             for pair in self.pairs
