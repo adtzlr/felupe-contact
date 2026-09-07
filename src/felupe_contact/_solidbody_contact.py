@@ -976,6 +976,8 @@ class SolidBodyContact:
         >>> import felupe as fem
         >>> import numpy as np
         >>>
+        >>> from felupe_contact import SolidBodyContact
+        >>>
         >>> bottom = fem.Cube(a=(0, 0, 0), b=(1, 1, 1), n=(4, 4, 3))
         >>> top = fem.Cube(a=(0.15, 0.15, 1.02), b=(0.85, 0.85, 1.62), n=(3, 3, 3))
         >>> container = fem.MeshContainer([bottom, top], merge=True)
@@ -1002,7 +1004,7 @@ class SolidBodyContact:
         ...         dim=3,
         ...     )]
         ... )
-        >>> contact = fem.SolidBodyContact(secondary, primary, items=[solid])
+        >>> contact = SolidBodyContact(secondary, primary, items=[solid])
 
     The bottom face of the lower block is fixed and the top face of the upper block is
     moved downwards.
