@@ -3,6 +3,8 @@ Solid-body contact
 ------------------
 A rubber block is pressed on a (stiffer) block. Both blocks are meshed
 individually and are combined to a single mesh.
+
+Compared to Ex. 1, all faces of the mesh are used as contact surfaces.
 """
 
 # sphinx_gallery_thumbnail_number = -1
@@ -24,18 +26,15 @@ field = fem.FieldContainer([fem.Field(region, dim=3)])
 solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
 
 # %%
-# The contact surfaces are created as boundary regions on the same mesh. Only the
-# faces on the outline of the mesh which are located in the region of interest are
-# used.
+# The contact surfaces are created as boundary regions on the same mesh. All faces on
+# the outline of the mesh which are located in the region of interest are used.
 mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
-secondary = fem.FieldContainer(
-    [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
-)
+secondary = fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(mesh), dim=3)])
 mask_primary = np.isclose(mesh.z, 1.0)
 primary = fem.FieldContainer(
     [
         fem.Field(
-            fem.RegionHexahedronBoundary(mesh, mask=mask_primary),
+            fem.RegionHexahedronBoundary(mesh),
             dim=3,
         )
     ]
