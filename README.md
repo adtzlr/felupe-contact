@@ -16,6 +16,7 @@ felupe-contact is an extension package for [FElupe](https://github.com/adtzlr/fe
 - ✅ all boundary regions of FElupe, i.e. faces with linear or quadratic shape functions
 - ✅ an item of FElupe, i.e. it is used in a `Step` and in a `Job` like a `SolidBody`
 - ✅ created directly on solid bodies with all faces on the outline of their meshes, i.e. no boundary regions are required
+- ✅ an efficient and robust contact search for contact surfaces with all faces, e.g. of many bodies
 
 ## 📦 Installation
 Install Python, open a terminal and run
