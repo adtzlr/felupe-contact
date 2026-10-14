@@ -8,6 +8,7 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from felupe_contact import SolidBodyContact
+from felupe_contact._solidbody_contact import ContactSurfacePair
 
 
 def two_blocks():
@@ -330,14 +331,14 @@ def test_requires_items_or_penalty():
         SolidBodyContact(surface(mesh), surface(mesh))
 
 
-def test_requires_a_boundary_region():
-    "A field on a boundary region is required for both contact surfaces."
+def test_pair_requires_a_boundary_region():
+    "A surface pair requires a field on a boundary region for both contact surfaces."
 
     mesh = two_blocks()
     volume = fem.FieldContainer([fem.Field(fem.RegionHexahedron(mesh), dim=3)])
 
     with pytest.raises(TypeError):
-        SolidBodyContact(volume, surface(mesh), penalty=1.0)
+        ContactSurfacePair(volume, surface(mesh))
 
 
 def test_requires_a_plane_strain_or_axisymmetric_field():

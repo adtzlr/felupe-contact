@@ -3,13 +3,14 @@
 import warnings
 
 import numpy as np
-from felupe import Field, FieldAxisymmetric, FieldPlaneStrain
+from felupe import Field, FieldAxisymmetric, FieldContainer, FieldPlaneStrain
 from felupe.math import cross, det, dot, dya, inv, norm, transpose
 from felupe.mechanics import Assemble, Results
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
+from ._boundary import contact_surface
 from ._element import face_element
 
 # the field types which define the out-of-plane behaviour of a contact surface, given
@@ -59,8 +60,9 @@ def connected_bodies(cells, npoints):
 
     Parameters
     ----------
-    cells : ndarray of shape (ncells, npoints_per_cell)
-        The point-connectivity of the cells of a mesh.
+    cells : ndarray of shape (ncells, npoints_per_cell) or list of ndarray
+        The point-connectivity of the cells of a mesh. A list of point-connectivities,
+        e.g. of cells with different numbers of points, is also supported.
     npoints : int
         The number of points of the mesh.
 
@@ -71,10 +73,13 @@ def connected_bodies(cells, npoints):
         to any cell are labelled individually.
     """
 
+    if not isinstance(cells, (list, tuple)):
+        cells = [cells]
+
     # it is sufficient to connect the points of a cell to its first point: this results
     # in the same connected components as a fully-connected cell
-    rows = np.repeat(cells[:, 0], cells.shape[1] - 1)
-    cols = cells[:, 1:].ravel()
+    rows = np.concatenate([np.repeat(c[:, 0], c.shape[1] - 1) for c in cells])
+    cols = np.concatenate([c[:, 1:].ravel() for c in cells])
 
     graph = coo_matrix(
         (np.ones(len(rows), dtype=bool), (rows, cols)), shape=(npoints, npoints)
@@ -190,6 +195,10 @@ class ContactSurfacePair:
         primary surface.
     weight : float, optional
         A scale factor for the contributions of this surface pair (default is 1.0).
+    cells : list of ndarray of shape (ncells, npoints_per_cell) or None, optional
+        The point-connectivities of the cells of the solid bodies, which are used to
+        identify the connected bodies of the mesh (default is None). If None, the cells
+        of both boundary regions are used.
 
     Notes
     -----
@@ -209,7 +218,7 @@ class ContactSurfacePair:
     is faster than a layout with leading batch-axes.
     """
 
-    def __init__(self, field, field_primary, weight=1.0):
+    def __init__(self, field, field_primary, weight=1.0, cells=None):
         self.field = field
         self.field_primary = field_primary
         self.weight = weight
@@ -302,11 +311,14 @@ class ContactSurfacePair:
         )
 
         # the connected bodies of the mesh: two faces which belong to the same body
-        # are never in contact, unless self-contact is considered
-        labels = connected_bodies(
-            np.vstack([region.mesh.cells, region_primary.mesh.cells]),
-            region.mesh.npoints,
-        )
+        # are never in contact, unless self-contact is considered. the cells of the
+        # boundary regions are not sufficient for a body with an enclosed cavity: the
+        # cells at the surface of the cavity and at the outer surface are disconnected
+        # if the wall is thicker than two cells
+        if cells is None:
+            cells = [region.mesh.cells, region_primary.mesh.cells]
+
+        labels = connected_bodies(cells, region.mesh.npoints)
         self.body = labels[self.cells_faces[:, 0]]
         self.body_primary = labels[self.cells_faces_primary[:, 0]]
 
@@ -933,19 +945,26 @@ class SolidBodyContact:
 
     Parameters
     ----------
-    field : FieldContainer
-        A field container with a displacement field, created on a boundary region of
-        the secondary (slave) surface, e.g. on a
-        :class:`~felupe.RegionHexahedronBoundary` or on a
-        :class:`~felupe.RegionQuadBoundary`. The weak form of the contact is integrated
-        on the faces of this surface.
-    field_primary : FieldContainer
-        A field container with a displacement field, created on a boundary region of
-        the primary (master) surface. The integration points of the secondary surface
-        are projected on the faces of this surface.
+    field : SolidBody or FieldContainer
+        The solid body of the secondary (slave) surface, e.g. a
+        :class:`~felupe.SolidBody`, or a field container with a displacement field. The
+        weak form of the contact is integrated on the faces of this surface. For a solid
+        body (or a field container on the region of a solid body), the boundary region
+        of its region is created, which contains all faces on the outline of its mesh
+        (or the faces within ``mask``). A field container on a boundary region, e.g. on
+        a :class:`~felupe.RegionHexahedronBoundary` or on a
+        :class:`~felupe.RegionQuadBoundary`, is used as contact surface.
+    field_primary : SolidBody or FieldContainer or None, optional
+        The solid body of the primary (master) surface or a field container with a
+        displacement field, see ``field`` (default is None). The integration points of
+        the secondary surface are projected on the faces of this surface. If None, the
+        secondary surface (or the faces within ``mask_primary`` of the same solid body)
+        is used as primary surface, i.e. all bodies of the mesh are able to touch each
+        other.
     items : list of SolidBody or None, optional
         A list of items which are used to estimate the penalty stiffness (default is
-        None). If None, ``penalty`` must be given.
+        None). If None, the given solid bodies are used. If neither solid bodies nor
+        items are given, ``penalty`` must be given.
     penalty : float or None, optional
         The penalty stiffness :math:`\epsilon` as contact traction per unit penetration
         (default is None). If None, the penalty stiffness is estimated from the mean
@@ -996,6 +1015,14 @@ class SolidBodyContact:
     geometric_stiffness : bool, optional
         Flag to add the geometric part of the contact stiffness matrix (default is
         True). This is required for a quadratic rate of convergence.
+    mask : ndarray of bool or None, optional
+        A mask of the points of the mesh of the secondary solid body (default is None).
+        Only the faces on the outline of the mesh with all their points in the mask are
+        used. If None, all faces on the outline are used. A mask requires a solid body
+        (or a field container on the region of a solid body).
+    mask_primary : ndarray of bool or None, optional
+        A mask of the points of the mesh of the primary solid body, see ``mask``
+        (default is None).
 
     Attributes
     ----------
@@ -1067,28 +1094,38 @@ class SolidBodyContact:
     outward unit normal vectors of both faces must be opposed, see ``facing``. Without
     these criteria, a face would detect another face of its own body, which is located
     on the opposite side of the body or around a corner, as a valid contact partner.
+    The bodies are identified by the cells of the given solid bodies or, for field
+    containers on boundary regions, by the cells of the boundary regions.
 
     All boundary regions of FElupe are supported: the faces of a boundary region of a
     three-dimensional mesh are (bi-) linear or quadratic quads and the faces of a
-    two-dimensional mesh are linear or quadratic lines (edges).
+    two-dimensional mesh are linear or quadratic lines (edges). For a solid body, the
+    boundary region is created for the region of its displacement field.
 
-    ..  list-table:: The faces of the boundary regions of FElupe
+    ..  list-table:: The regions, boundary regions and faces of FElupe
         :header-rows: 1
-        :widths: 70 30
+        :widths: 35 45 20
 
-        *   - Boundary region
+        *   - Region
+            - Boundary region
             - Face
-        *   - :class:`~felupe.RegionQuadBoundary`
+        *   - :class:`~felupe.RegionQuad`
+            - :class:`~felupe.RegionQuadBoundary`
             - ``line``
-        *   - :class:`~felupe.RegionQuadraticQuadBoundary`
+        *   - :class:`~felupe.RegionQuadraticQuad`
+            - :class:`~felupe.RegionQuadraticQuadBoundary`
             - ``line3``
-        *   - :class:`~felupe.RegionBiQuadraticQuadBoundary`
+        *   - :class:`~felupe.RegionBiQuadraticQuad`
+            - :class:`~felupe.RegionBiQuadraticQuadBoundary`
             - ``line3``
-        *   - :class:`~felupe.RegionHexahedronBoundary`
+        *   - :class:`~felupe.RegionHexahedron`
+            - :class:`~felupe.RegionHexahedronBoundary`
             - ``quad``
-        *   - :class:`~felupe.RegionQuadraticHexahedronBoundary`
+        *   - :class:`~felupe.RegionQuadraticHexahedron`
+            - :class:`~felupe.RegionQuadraticHexahedronBoundary`
             - ``quad8``
-        *   - :class:`~felupe.RegionTriQuadraticHexahedronBoundary`
+        *   - :class:`~felupe.RegionTriQuadraticHexahedron`
+            - :class:`~felupe.RegionTriQuadraticHexahedronBoundary`
             - ``quad9``
 
     In 2d, the out-of-plane behaviour is defined by the type of the displacement field:
@@ -1100,9 +1137,10 @@ class SolidBodyContact:
 
     ..  note::
 
-        The mesh of both boundary regions must be the same mesh as the mesh of the
-        region of the solid bodies. Two separate meshes are combined by
-        :meth:`MeshContainer.stack() <felupe.MeshContainer.stack>`.
+        The meshes of both contact surfaces must share the points with the mesh of the
+        global field container. Two separate meshes are combined by
+        :meth:`MeshContainer.stack() <felupe.MeshContainer.stack>` or by a
+        :class:`~felupe.MeshContainer` with ``merge=True``.
 
     ..  hint::
 
@@ -1161,24 +1199,13 @@ class SolidBodyContact:
         >>> field = fem.FieldContainer([fem.Field(region, dim=3)])
         >>> solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
 
-    The contact surfaces are created as boundary regions on the same mesh. Only the
-    faces on the outline of the mesh which are located in the region of interest are
-    used.
+    The contact surfaces are created on the outline of the mesh of the solid body. All
+    faces are used, i.e. all bodies of the mesh are able to touch each other.
 
     ..  pyvista-plot::
         :context:
 
-        >>> mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
-        >>> secondary = fem.FieldContainer(
-        ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
-        ... )
-        >>> primary = fem.FieldContainer(
-        ...     [fem.Field(
-        ...         fem.RegionHexahedronBoundary(mesh, mask=np.isclose(mesh.z, 1.0)),
-        ...         dim=3,
-        ...     )]
-        ... )
-        >>> contact = SolidBodyContact(secondary, primary, items=[solid])
+        >>> contact = SolidBodyContact(solid)
 
     The bottom face of the lower block is fixed and the top face of the upper block is
     moved downwards.
@@ -1200,13 +1227,14 @@ class SolidBodyContact:
         >>> job = fem.Job(steps=[step]).evaluate(verbose=0)
 
     The number of integration points which are in contact and the penalty stiffness,
-    which is estimated from the given items, are available in the contact object.
+    which is estimated from the solid body, are available in the contact object. Both
+    faces of the contact zone are used as secondary surfaces.
 
     ..  pyvista-plot::
         :context:
 
         >>> contact.results.npoints_in_contact
-        16
+        32
 
     ..  pyvista-plot::
         :context:
@@ -1214,10 +1242,41 @@ class SolidBodyContact:
 
         >>> solid.plot("Principal Values of Cauchy Stress").show()
 
-    An axisymmetric contact is created on the boundary regions of a two-dimensional
-    mesh, where the displacement fields are axisymmetric fields. The rotation axis is
-    the first axis of the mesh, i.e. a cylinder is placed on top of a bigger cylinder
-    if both blocks are stacked along the first axis.
+    The contact surfaces may be restricted to the region of interest by masks of the
+    points of the mesh. Here, the bottom face of the upper block is the secondary
+    surface and the top face of the lower block is the primary surface.
+
+    ..  pyvista-plot::
+        :context:
+
+        >>> contact = SolidBodyContact(
+        ...     solid,
+        ...     mask=np.logical_and(mesh.z > 1.0, mesh.z < 1.1),
+        ...     mask_primary=np.isclose(mesh.z, 1.0),
+        ... )
+
+    Alternatively, field containers on boundary regions are used as contact surfaces.
+    Then, the items for the estimation of the penalty stiffness must be given.
+
+    ..  pyvista-plot::
+        :context:
+
+        >>> mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
+        >>> secondary = fem.FieldContainer(
+        ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
+        ... )
+        >>> primary = fem.FieldContainer(
+        ...     [fem.Field(
+        ...         fem.RegionHexahedronBoundary(mesh, mask=np.isclose(mesh.z, 1.0)),
+        ...         dim=3,
+        ...     )]
+        ... )
+        >>> contact = SolidBodyContact(secondary, primary, items=[solid])
+
+    An axisymmetric contact is created on the boundary region of a two-dimensional
+    mesh, where the displacement field of the solid body is an axisymmetric field. The
+    rotation axis is the first axis of the mesh, i.e. a cylinder is placed on top of a
+    bigger cylinder if both blocks are stacked along the first axis.
 
     ..  pyvista-plot::
         :context:
@@ -1231,12 +1290,9 @@ class SolidBodyContact:
         ... )
         >>> solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
         >>>
-        >>> surface = fem.FieldContainer(
-        ...     [fem.FieldAxisymmetric(fem.RegionQuadBoundary(mesh), dim=2)]
-        ... )
-        >>> contact = SolidBodyContact(surface, surface, items=[solid])
-        >>> contact.results.npoints_in_contact
-        0
+        >>> contact = SolidBodyContact(solid)
+        >>> type(contact.field[0]).__name__
+        'FieldAxisymmetric'
 
     See Also
     --------
@@ -1248,7 +1304,7 @@ class SolidBodyContact:
     def __init__(
         self,
         field,
-        field_primary,
+        field_primary=None,
         items=None,
         penalty=None,
         penalty_scale=10.0,
@@ -1260,7 +1316,26 @@ class SolidBodyContact:
         facing=0.1,
         self_contact=False,
         geometric_stiffness=True,
+        mask=None,
+        mask_primary=None,
     ):
+        bodies = [field] if field_primary is None else [field, field_primary]
+
+        # the contact surfaces, i.e. field containers on boundary regions. for a solid
+        # body, the boundary region is created on its region
+        field, cells = contact_surface(bodies[0], mask=mask)
+        field_primary, cells_primary = field, cells
+
+        if len(bodies) > 1 or mask_primary is not None:
+            field_primary, cells_primary = contact_surface(
+                bodies[-1], mask=mask_primary
+            )
+
+        # the given solid bodies are used to estimate the penalty stiffness
+        if items is None:
+            solids = [b for b in bodies if not isinstance(b, FieldContainer)]
+            items = list({id(solid): solid for solid in solids}.values()) or None
+
         self.field = field
         self.field_primary = field_primary
         self.items = items
@@ -1275,14 +1350,24 @@ class SolidBodyContact:
         self.geometric_stiffness = geometric_stiffness
 
         if items is None and penalty is None:
-            raise ValueError("Either `items` or `penalty` must be given.")
+            raise ValueError(
+                "Either solid bodies, `items` or `penalty` must be given to estimate "
+                "the penalty stiffness."
+            )
 
-        self.pairs = [ContactSurfacePair(field, field_primary)]
+        # the cells of the solid bodies identify the connected bodies of the mesh. the
+        # cells of a boundary region are used if no solid body is given
+        cells = [
+            surface[0].region.mesh.cells if c is None else c
+            for surface, c in [(field, cells), (field_primary, cells_primary)]
+        ]
+
+        self.pairs = [ContactSurfacePair(field, field_primary, cells=cells)]
 
         if two_pass:
             self.pairs = [
-                ContactSurfacePair(field, field_primary, weight=0.5),
-                ContactSurfacePair(field_primary, field, weight=0.5),
+                ContactSurfacePair(field, field_primary, weight=0.5, cells=cells),
+                ContactSurfacePair(field_primary, field, weight=0.5, cells=cells),
             ]
 
         self.size = self.pairs[0].size

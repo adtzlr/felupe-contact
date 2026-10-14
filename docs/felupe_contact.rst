@@ -5,7 +5,7 @@ API Reference
 
 .. currentmodule:: felupe_contact
 
-The contacts of felupe-contact are items of FElupe, see :class:`felupe.mechanics.Item`. They are created from field containers on the boundary regions of FElupe and they are used in a :class:`~felupe.Step` and in a :class:`~felupe.Job` together with the solid bodies.
+The contacts of felupe-contact are items of FElupe, see :class:`felupe.mechanics.Item`. They are created on the solid bodies (or on field containers on the boundary regions of FElupe) and they are used in a :class:`~felupe.Step` and in a :class:`~felupe.Job` together with the solid bodies.
 
 **Contact**
 
@@ -25,6 +25,8 @@ These classes and functions are used internally by :class:`~felupe_contact.Solid
    _solidbody_contact.connected_bodies
    _element.BatchedElement
    _element.face_element
+   _boundary.boundary_region
+   _boundary.contact_surface
 
 **Related Classes of FElupe**
 
@@ -33,6 +35,8 @@ The building blocks of a model with a contact are taken from FElupe.
 .. list-table::
    :widths: 40 60
 
+   *   - Solid bodies and their regions
+       - :class:`~felupe.SolidBody`, :class:`~felupe.SolidBodyNearlyIncompressible`, :class:`~felupe.RegionQuad`, :class:`~felupe.RegionQuadraticQuad`, :class:`~felupe.RegionBiQuadraticQuad`, :class:`~felupe.RegionHexahedron`, :class:`~felupe.RegionQuadraticHexahedron`, :class:`~felupe.RegionTriQuadraticHexahedron`
    *   - Contact surfaces
        - :class:`~felupe.RegionQuadBoundary`, :class:`~felupe.RegionQuadraticQuadBoundary`, :class:`~felupe.RegionBiQuadraticQuadBoundary`, :class:`~felupe.RegionHexahedronBoundary`, :class:`~felupe.RegionQuadraticHexahedronBoundary`, :class:`~felupe.RegionTriQuadraticHexahedronBoundary`
    *   - Displacement fields
@@ -66,3 +70,7 @@ The building blocks of a model with a contact are taken from FElupe.
    :show-inheritance:
 
 .. autofunction:: felupe_contact._element.face_element
+
+.. autofunction:: felupe_contact._boundary.boundary_region
+
+.. autofunction:: felupe_contact._boundary.contact_surface

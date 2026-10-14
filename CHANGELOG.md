@@ -47,6 +47,21 @@ All notable changes to this project will be documented in this file. The format 
   possible to use all faces on the outline of a mesh as contact surfaces, i.e. without
   restricting the boundary regions to the region of interest.
 - Added a test suite in `tests/`, which covers the package by 100%.
+- Added a mode of `SolidBodyContact` which works with solid bodies directly, e.g.
+  `SolidBodyContact(solid)` or `SolidBodyContact(solid_a, solid_b)`. The boundary region
+  is created for the region of the displacement field of a solid body by the dict
+  `felupe_contact._boundary.BOUNDARY_REGIONS` (region -> boundary region, e.g.
+  `RegionHexahedron` -> `RegionHexahedronBoundary`) with a displacement field of the
+  same type, whose values are linked to the solid body. All faces on the outline of the
+  mesh are used, or the faces within the new arguments `mask` and `mask_primary`. A
+  field container on the region of a solid body is supported as well. The argument
+  `field_primary` is now optional: if None, the secondary surface is also the primary
+  surface. If no `items` are given, the solid bodies are used to estimate the penalty
+  stiffness. Field containers on boundary regions are still supported.
+- Added `felupe_contact._boundary.boundary_region()` and
+  `felupe_contact._boundary.contact_surface()`, which create the contact surfaces of
+  the solid bodies.
+- Added the tests `tests/test_solidbody_mode.py`.
 - Added the documentation, which is built by Sphinx (with the PyData theme, like FElupe)
   on Read the Docs. It contains an API reference and a gallery of the examples, which
   are run by Sphinx-Gallery. The documentation was configured in `.readthedocs.yaml` but
@@ -76,6 +91,11 @@ All notable changes to this project will be documented in this file. The format 
   of FElupe are detected before they are released.
 
 ### Fixed
+- Fixed the connected bodies of a body with an enclosed cavity. The bodies were
+  identified by the cells of the boundary regions, which are disconnected for a wall
+  of more than two cells, i.e. the inner surface was detected as another body which
+  penetrates the outer surface, even in the undeformed configuration. Now, the cells
+  of the solid bodies are used if solid bodies are given.
 - Fixed the package metadata: the project is named `felupe-contact` and its version is
   read from `felupe_contact.__about__`. Both were set to `felupe`, which made the build
   fail with `ModuleNotFoundError: No module named 'felupe'`.
@@ -102,6 +122,10 @@ All notable changes to this project will be documented in this file. The format 
   are not in contact if other integration points are in contact.
 
 ### Changed
+- Changed `connected_bodies()` to support a list of point-connectivities, e.g. of
+  cells with different numbers of points.
+- Changed Ex. 2 and Ex. 3 to create the contact on the solid bodies and the README to
+  the solid-body mode of `SolidBodyContact`.
 - Changed the assembly of the block of the contact stiffness matrix and of the part of
   the contact force vector, which contain only test- and trial-functions of the
   secondary surface, from an `IntegralForm` to the direct assembly which is already used

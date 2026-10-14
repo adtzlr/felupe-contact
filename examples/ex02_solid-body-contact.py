@@ -4,7 +4,8 @@ Solid-body contact (all faces)
 A rubber block is pressed on a (stiffer) block. Both blocks are meshed
 individually and are combined to a single mesh.
 
-Compared to Ex. 1, all faces of the mesh are used as contact surfaces.
+Compared to Ex. 1, all faces of the mesh are used as contact surfaces. The contact
+surfaces are created from the solid body, i.e. no boundary regions are required.
 """
 
 # sphinx_gallery_thumbnail_number = -1
@@ -24,14 +25,12 @@ field = fem.FieldContainer([fem.Field(region, dim=3)])
 solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
 
 # %%
-# The contact surfaces are created as boundary regions on the same mesh. In contrast to
-# Ex. 1, no mask is used: all faces on the outline of the mesh are contact surfaces. The
-# contact search discards the face-pairs which are not able to touch each other, i.e.
-# the faces which belong to the same body and the faces which are located around a
-# corner.
-secondary = fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(mesh), dim=3)])
-primary = fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(mesh), dim=3)])
-contact = SolidBodyContact(secondary, primary, items=[solid])
+# The contact is created on the solid body. Its boundary region with all faces on the
+# outline of the mesh is created automatically, i.e. in contrast to Ex. 1, no masks are
+# used. The contact search discards the face-pairs which are not able to touch each
+# other, i.e. the faces which belong to the same body and the faces which are located
+# around a corner. The penalty stiffness is estimated from the solid body.
+contact = SolidBodyContact(solid)
 
 # %%
 # The bottom face of the lower block is fixed and the top face of the upper block is
@@ -51,7 +50,7 @@ job = fem.Job(steps=[step]).evaluate(verbose=0)
 
 # %%
 # The number of integration points which are in contact and the penalty stiffness,
-# which is estimated from the given items, are available in the contact object. Both
+# which is estimated from the solid body, are available in the contact object. Both
 # faces of the contact zone are used as secondary surfaces here, hence twice the number
 # of integration points of Ex. 1 are in contact.
 print(contact)
