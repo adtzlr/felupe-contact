@@ -2,6 +2,11 @@
 
 import pytest
 
+# the configuration of Sphinx and the generated pages of Sphinx-Gallery are not tested,
+# only the code-examples (doctests) of the rst-files of the documentation
+collect_ignore = ["docs/conf.py"]
+collect_ignore_glob = ["docs/_build/*", "docs/examples/*"]
+
 
 def pytest_configure(config):
     "Render the plots of the tests and of the docstring examples off-screen."

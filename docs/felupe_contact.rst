@@ -5,7 +5,7 @@ API Reference
 
 .. currentmodule:: felupe_contact
 
-The contact formulations of felupe-contact are items of FElupe, i.e. they are used in a :class:`~felupe.Step` and in a :class:`~felupe.Job` together with the solid bodies.
+The contacts of felupe-contact are items of FElupe, see :class:`felupe.mechanics.Item`. They are created from field containers on the boundary regions of FElupe and they are used in a :class:`~felupe.Step` and in a :class:`~felupe.Job` together with the solid bodies.
 
 **Contact**
 
@@ -25,6 +25,22 @@ These classes and functions are used internally by :class:`~felupe_contact.Solid
    _solidbody_contact.connected_bodies
    _element.BatchedElement
    _element.face_element
+
+**Related Classes of FElupe**
+
+The building blocks of a model with a contact are taken from FElupe.
+
+.. list-table::
+   :widths: 40 60
+
+   *   - Contact surfaces
+       - :class:`~felupe.RegionQuadBoundary`, :class:`~felupe.RegionQuadraticQuadBoundary`, :class:`~felupe.RegionBiQuadraticQuadBoundary`, :class:`~felupe.RegionHexahedronBoundary`, :class:`~felupe.RegionQuadraticHexahedronBoundary`, :class:`~felupe.RegionTriQuadraticHexahedronBoundary`
+   *   - Displacement fields
+       - :class:`~felupe.Field`, :class:`~felupe.FieldPlaneStrain`, :class:`~felupe.FieldAxisymmetric`, :class:`~felupe.FieldContainer`
+   *   - Steps, jobs and plugins
+       - :class:`~felupe.Step`, :class:`~felupe.Job`, :class:`~felupe.CharacteristicCurve`, :class:`~felupe.CutbackPlugin`, :class:`~felupe.LinesearchPlugin`
+   *   - Other contacts
+       - :class:`~felupe.MultiPointContact`, :class:`~felupe.ContactRigidPlane`, :class:`~felupe.ContactRigidCylinder`, :class:`~felupe.ThirdMediumContactMixed`
 
 **Detailed API Reference**
 

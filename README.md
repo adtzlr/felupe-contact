@@ -68,7 +68,7 @@ solid.plot("Principal Values of Cauchy Stress").show()
 ```
 
 ## 📖 Documentation
-The documentation is located [here](https://felupe-contact.readthedocs.io/en/latest/).
+The documentation is located [here](https://felupe-contact.readthedocs.io/en/latest/). It contains a [Getting Started](https://felupe-contact.readthedocs.io/en/latest/start.html) guide, which adds a contact to a FElupe-script step by step, How-To guides, a gallery of examples and the API reference.
 
 ## 🛠️ Testing
 

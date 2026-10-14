@@ -51,6 +51,13 @@ All notable changes to this project will be documented in this file. The format 
   on Read the Docs. It contains an API reference and a gallery of the examples, which
   are run by Sphinx-Gallery. The documentation was configured in `.readthedocs.yaml` but
   its source in `docs/` was missing.
+- Added the first version of the content of the documentation, which presents
+  felupe-contact as an extension package for FElupe: the landing page compares the
+  contact formulations of FElupe and felupe-contact, a *Getting Started* guide adds a
+  contact to a FElupe-script step by step and the *How-To* guides explain the definition
+  of the contact surfaces, plane strain and axisymmetric contact, the penalty stiffness
+  and the convergence (incl. the `CutbackPlugin` and the `LinesearchPlugin` of FElupe)
+  and the contact results. The API reference lists the related classes of FElupe.
 - Added a `README.md`, which is required by the package metadata, a contribution guide
   `CONTRIBUTING.md`, a code of conduct `CODE_OF_CONDUCT.md`, a `CITATION.cff` and issue
   templates for bug reports and enhancement suggestions, like in FElupe.
@@ -60,7 +67,9 @@ All notable changes to this project will be documented in this file. The format 
 - Added the examples of the docstrings to the tests, i.e. `pytest` runs the tests in
   `tests/` and the doctests in `src/felupe_contact`, configured in `pyproject.toml`. The
   plots of the examples are rendered off-screen and the examples are run in a temporary
-  directory, see `conftest.py` (like FElupe).
+  directory, see `conftest.py` (like FElupe). The code-examples of the documentation are
+  tested as doctests of the rst-files in `docs/`, i.e. they are also tested with the
+  development version of FElupe.
 - Added the tox-environment `main`, which runs the tests with the development version
   of FElupe, i.e. with its `main` branch. The workflow `upload-codecov.yml` runs it for
   Python 3.14 after the tests with the latest release of FElupe, i.e. changes of the API
@@ -145,6 +154,10 @@ All notable changes to this project will be documented in this file. The format 
   directly by this package.
 - Changed the titles of Ex. 2 (all faces) and Ex. 3 (sub-meshes), which were equal to
   the title of Ex. 1, and moved all imports of the examples to their first cell.
+- Changed the examples to print the contact object, which shows the estimated penalty
+  stiffness, the smoothing and the number of integration points in contact. The text of
+  the examples referred to the penalty stiffness, but only the number of integration
+  points in contact was printed.
 
 ### Removed
 - Removed `shape_function_quad()` and the hard-coded second derivative of the shape
