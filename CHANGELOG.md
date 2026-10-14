@@ -142,9 +142,7 @@ All notable changes to this project will be documented in this file. The format 
   `ContactSurfacePair.friction()`, `ContactSurfacePair.vector_friction()` and
   `ContactSurfacePair.matrix_friction()`, which evaluate the friction of the face-pairs.
   The anchors of sliding integration points are relocated exactly, i.e. the tangential
-  tractions are reproduced at the beginning of the next increment. The friction works on
-  C-contiguous copies of the contact kinematics, see `contiguous()`, which makes the
-  assembly of its stiffness matrix about twice as fast.
+  tractions are reproduced at the beginning of the next increment.
 - Added the tests `tests/test_friction.py` (incl. the tangent of the force vector for
   all boundary regions, gross sliding on a stiff base with a tangential force of the
   friction coefficient times the normal force and a cutback, which gives the same
@@ -243,6 +241,14 @@ All notable changes to this project will be documented in this file. The format 
 - Changed `ContactSurfacePair.kinematics()` to return also the deformed coordinates of
   the integration points in contact and the natural element coordinates of their
   projections, which are required by the friction.
+- Changed `ContactSurfacePair.kinematics()` to return C-contiguous arrays, see the new
+  helper `contiguous()`. The arrays of the face-pairs in contact are selected from the
+  candidate face-pairs by advanced indexing of their last axis, which results in arrays
+  that are not contiguous in memory. This slowed down the contractions by
+  `numpy.einsum()` of the assembly by up to a factor of 50 for a single contraction. The
+  assembly of the stiffness matrix of the frictionless contact is about 1.3 to 2 times
+  faster, the one of the frictional contact about 1.2 to 1.6 times (the results are
+  unchanged, bit for bit).
   The second derivatives of the surface coordinates are now evaluated by the hessian of
   the shape functions of the faces instead of the constant mixed second derivative of a
   bilinear quad, i.e. curved faces are supported.

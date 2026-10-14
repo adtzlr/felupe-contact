@@ -1081,19 +1081,23 @@ class ContactSurfacePair:
         self.face[:] = -1
         self.face[point] = face
 
-        return {
-            "point": point,
-            "face": face,
-            "points": points[:, point],
-            "coordinates": coordinates[:, best],
-            "gap": gap,
-            "normal": normal,
-            "tangents": a,
-            "metric": metric,
-            "curvature": curvature,
-            "h": h,
-            "dhdr": dhdr,
-        }
+        # the arrays of the face-pairs in contact are selected by advanced indexing of
+        # their last axis, which results in arrays that are not contiguous in memory
+        return contiguous(
+            {
+                "point": point,
+                "face": face,
+                "points": points[:, point],
+                "coordinates": coordinates[:, best],
+                "gap": gap,
+                "normal": normal,
+                "tangents": a,
+                "metric": metric,
+                "curvature": curvature,
+                "h": h,
+                "dhdr": dhdr,
+            }
+        )
 
     def variations_gap(self, kinematics):
         r"""Return the variation of the gap w.r.t. the displacements of the points of a
@@ -1676,8 +1680,6 @@ class ContactSurfacePair:
         integration point which slides in the last converged increment.
         """
 
-        kinematics = contiguous(kinematics)
-
         point, face = kinematics["point"], kinematics["face"]
         normal = kinematics["normal"]
 
@@ -1878,8 +1880,6 @@ class ContactSurfacePair:
         virtual work :eq:`friction-weak-form`, which includes the change of the shape
         functions of the primary surface at the projected point. It is not symmetric.
         """
-
-        kinematics = contiguous(kinematics)
 
         point = kinematics["point"]
         normal = kinematics["normal"]
