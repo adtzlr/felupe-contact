@@ -54,7 +54,7 @@ job = fem.Job(steps=[step]).evaluate(verbose=0)
 # which is estimated from the given items, are available in the contact object. Both
 # faces of the contact zone are used as secondary surfaces here, hence twice the number
 # of integration points of Ex. 1 are in contact.
-print(contact.results.npoints_in_contact)
+print(contact)
 
 # %%
 # The principal values of the Cauchy stress are available in the solid body

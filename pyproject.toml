@@ -30,8 +30,9 @@ ignore = [
 "examples/**" = ["E402"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "src/felupe_contact"]
-addopts = ["--doctest-modules", "--import-mode=importlib"]
+# the code-examples of the documentation are tested by the doctests of the rst-files
+testpaths = ["tests", "src/felupe_contact", "docs"]
+addopts = ["--doctest-modules", "--doctest-glob=*.rst", "--import-mode=importlib"]
 doctest_optionflags = ["NORMALIZE_WHITESPACE", "ELLIPSIS"]
 
 [project]

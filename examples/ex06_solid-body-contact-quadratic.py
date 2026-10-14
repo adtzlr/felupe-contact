@@ -65,7 +65,7 @@ job = fem.Job(steps=[step]).evaluate(verbose=0)
 # The number of integration points which are in contact and the penalty stiffness,
 # which is estimated from the given items, are available in the contact object. A
 # quadratic face has three integration points instead of two.
-print(contact.results.npoints_in_contact)
+print(contact)
 
 # %%
 # The principal values of the Cauchy stress are available in the solid body
