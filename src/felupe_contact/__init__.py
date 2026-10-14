@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 from ._solidbody_contact import SolidBodyContact
 
 __all__ = [

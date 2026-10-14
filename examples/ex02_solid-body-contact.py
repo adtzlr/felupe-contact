@@ -1,6 +1,6 @@
 r"""
-Solid-body contact
-------------------
+Solid-body contact (all faces)
+------------------------------
 A rubber block is pressed on a (stiffer) block. Both blocks are meshed
 individually and are combined to a single mesh.
 

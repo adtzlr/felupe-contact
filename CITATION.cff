@@ -1,0 +1,16 @@
+cff-version: "1.2.0"
+authors:
+- family-names: Dutzler
+  given-names: Andreas
+  orcid: "https://orcid.org/0000-0002-9383-9686"
+message: If you use this software, please cite it using the metadata from this file.
+title: "felupe-contact: Contact Extension-package for FElupe"
+type: software
+license: GPL-3.0-or-later
+repository-code: "https://github.com/adtzlr/felupe-contact"
+url: "https://felupe-contact.readthedocs.io"
+keywords:
+- computational-mechanics
+- contact-mechanics
+- finite-elements
+- python

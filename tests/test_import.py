@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 import felupe_contact
 from felupe_contact import SolidBodyContact
 from felupe_contact.__about__ import __version__
