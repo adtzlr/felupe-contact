@@ -1,31 +1,14 @@
-# -*- coding: utf-8 -*-
-"""
-This file is part of FElupe.
-
-FElupe is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-FElupe is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with FElupe.  If not, see <http://www.gnu.org/licenses/>.
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 import warnings
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
-from scipy.sparse.csgraph import connected_components
-from scipy.spatial import cKDTree
-
 from felupe import Field, FieldAxisymmetric, FieldPlaneStrain
 from felupe.math import cross, det, dot, dya, inv, norm, transpose
 from felupe.mechanics import Assemble, Results
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.csgraph import connected_components
+from scipy.spatial import cKDTree
 
 from ._element import face_element
 
@@ -1222,7 +1205,7 @@ class SolidBodyContact:
     if both blocks are stacked along the first axis.
 
     ..  pyvista-plot::
-        :context: close-figs
+        :context:
 
         >>> bottom = fem.Rectangle(a=(0, 0), b=(1, 1), n=(3, 5))
         >>> top = fem.Rectangle(a=(1.02, 0), b=(1.62, 0.7), n=(3, 4))

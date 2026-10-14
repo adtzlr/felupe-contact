@@ -2,8 +2,37 @@
 requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
-[tool.isort]
-profile = "black"
+[tool.ruff]
+src = ["src"]
+
+[tool.ruff.lint]
+# an explicit selection of rules, independent of the default rules of ruff
+select = [
+  "E4",  # imports (pycodestyle)
+  "E7",  # statements (pycodestyle)
+  "E9",  # runtime and syntax errors (pycodestyle)
+  "F",  # pyflakes
+  "B006",  # mutable default arguments
+  "I",  # sorted imports (isort)
+  "W",  # whitespace
+]
+ignore = [
+  "E731",  # lambda assignments, e.g. for short functions in tests and examples
+  "E741",  # ambiguous variable names, e.g. `l` (notation of continuum mechanics)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# the public API is re-exported
+"__init__.py" = ["F401"]
+# results of calls are bound to variables without being checked
+"tests/**" = ["F841"]
+# the scripts of sphinx-gallery import modules in later cells
+"examples/**" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src/felupe_contact"]
+addopts = ["--doctest-modules", "--import-mode=importlib"]
+doctest_optionflags = ["NORMALIZE_WHITESPACE", "ELLIPSIS"]
 
 [project]
 name = "felupe-contact"
@@ -12,7 +41,7 @@ readme = "README.md"
 authors = [
   {name = "Andreas Dutzler", email = "a.dutzler@gmail.com"},
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 keywords = [
@@ -23,17 +52,16 @@ keywords = [
   "finite-elements",
   "finite-elements-methods",
   "partial-differential-equations",
-  "python", 
+  "python",
   "scientific-computing",
   "solid-mechanics-codes",
 ]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
   "Operating System :: OS Independent",
   "Programming Language :: Python",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -46,6 +74,8 @@ dynamic = ["version"]
 
 dependencies = [
   "felupe",
+  "numpy",
+  "scipy",
 ]
 
 [project.optional-dependencies]
@@ -63,21 +93,7 @@ docs = [
 all = ["felupe[all]"]
 
 [dependency-groups]
-read-the-docs = ["felupe-contact[docs]", "felupe[all,docs,examples]"]
-
-[[tool.uv.index]]
-name = "pypi"
-url = "https://pypi.org/simple"
-default = true
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-
-[tool.uv.sources]
-setuptools = {index = "pypi"}
-torch = {index = "pytorch-cpu"}
-torchvision = {index = "pytorch-cpu"}
+read-the-docs = ["felupe-contact[all,docs]"]
 
 [tool.setuptools.dynamic]
 version = {attr = "felupe_contact.__about__.__version__"}

@@ -7,13 +7,12 @@ individually and are combined to a single mesh.
 
 # sphinx_gallery_thumbnail_number = -1
 import felupe as fem
+import numpy as np
+
 from felupe_contact import SolidBodyContact
 
 # %%
 #
-import felupe as fem
-import numpy as np
-
 bottom = fem.Cube(a=(0, 0, 0), b=(1, 1, 1), n=(4, 4, 3))
 top = fem.Cube(a=(0.15, 0.15, 1.02), b=(0.85, 0.85, 1.62), n=(3, 3, 3))
 container = fem.MeshContainer([bottom, top], merge=True)

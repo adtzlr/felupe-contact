@@ -20,25 +20,34 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.14"]
+        python-version: ["3.11", "3.14"]
 
     steps:
     - uses: actions/checkout@v4
 
-    # - uses: pyvista/setup-headless-display-action@v3
-  
+    - uses: pyvista/setup-headless-display-action@v3
+
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
         cache: "pip"
-  
+
     - name: Test with tox
+      env:
+        # only the coverage report of Python 3.14 is uploaded
+        COVERAGE_ARGS: ${{ matrix.python-version == '3.14' && '--cov felupe_contact --cov-report xml --cov-report term' || '' }}
       run: |
-        pip install tox
-        tox -- --cov felupe_contact --cov-report xml --cov-report term
-  
+        pip install tox tox-uv
+        tox -- $COVERAGE_ARGS
+
     - name: Upload coverage to Codecov
       if: ${{ matrix.python-version == '3.14' }}
       uses: codecov/codecov-action@v4
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
+
+    # the latest release of FElupe is tested above, the development version is tested
+    # here to detect changes of the API of FElupe before they are released
+    - name: Test with the development version of FElupe
+      if: ${{ matrix.python-version == '3.14' }}
+      run: tox -e main

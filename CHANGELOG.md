@@ -37,16 +37,38 @@ All notable changes to this project will be documented in this file. The format 
   possible to use all faces on the outline of a mesh as contact surfaces, i.e. without
   restricting the boundary regions to the region of interest.
 - Added a test suite in `tests/`, which covers the package by 100%.
+- Added the documentation, which is built by Sphinx (with the PyData theme, like FElupe)
+  on Read the Docs. It contains an API reference and a gallery of the examples, which
+  are run by Sphinx-Gallery. The documentation was configured in `.readthedocs.yaml` but
+  its source in `docs/` was missing.
+- Added a `README.md`, which is required by the package metadata, a contribution guide
+  `CONTRIBUTING.md`, a code of conduct `CODE_OF_CONDUCT.md`, a `CITATION.cff` and issue
+  templates for bug reports and enhancement suggestions, like in FElupe.
+- Added the linting and the formatting of the code by ruff with the rules of FElupe,
+  configured in `pyproject.toml`. The checks are run locally by the hooks of pre-commit
+  (`.pre-commit-config.yaml`) and by the workflow `lint.yml` for each pull request.
+- Added the examples of the docstrings to the tests, i.e. `pytest` runs the tests in
+  `tests/` and the doctests in `src/felupe_contact`, configured in `pyproject.toml`. The
+  plots of the examples are rendered off-screen and the examples are run in a temporary
+  directory, see `conftest.py` (like FElupe).
+- Added the tox-environment `main`, which runs the tests with the development version
+  of FElupe, i.e. with its `main` branch. The workflow `upload-codecov.yml` runs it for
+  Python 3.14 after the tests with the latest release of FElupe, i.e. changes of the API
+  of FElupe are detected before they are released.
 
 ### Fixed
 - Fixed the package metadata: the project is named `felupe-contact` and its version is
   read from `felupe_contact.__about__`. Both were set to `felupe`, which made the build
   fail with `ModuleNotFoundError: No module named 'felupe'`.
+- Fixed the option `:context:` of the `pyvista-plot` directive of the axisymmetric
+  example in the docstring of `SolidBodyContact`, which takes no value (`close-figs` is
+  a value of the `plot` directive of matplotlib). It raised an error in the build of the
+  documentation.
 - Fixed the `read-the-docs` dependency group: it now installs the documentation
-  requirements of this package, `felupe-contact[docs]`, and the plotting- and
-  example-requirements of FElupe, `felupe[all,examples]`. The group referenced
-  `felupe[all,docs,examples]`, which was a self-reference to this package due to its
-  wrong name.
+  requirements and the optional dependencies of this package, `felupe-contact[all,docs]`.
+  The group referenced `felupe[all,docs,examples]`, which was a self-reference to this
+  package due to its wrong name. The examples of FElupe and their requirements (e.g.
+  PyTorch from its own package index) are not required.
 - Fixed the reference to `SolidBodyContact` in its docstring-example, which was given as
   `fem.SolidBodyContact`. The class is imported from `felupe_contact`.
 - Fixed the *See Also*-reference of `SolidBodyContact`, which pointed to the
@@ -91,6 +113,20 @@ All notable changes to this project will be documented in this file. The format 
   of re-implemented. It also broadcasts the scalar-valued quantities of the face-pairs,
   like the gap, without a reshape and it evaluates about four times faster than the
   batched matrix products on a layout with leading batch-axes.
+- Changed the minimum version of Python to 3.11, like FElupe (v12). The tests run on
+  Python 3.11 and 3.14.
+- Changed the tests of tox to run in parallel by `pytest-xdist`. The environment `core`
+  runs the import-test with the required dependencies only, i.e. without the optional
+  dependencies of FElupe.
+- Changed the license-headers of the source files to SPDX license identifiers, like in
+  FElupe. The headers stated that the files are part of FElupe.
+- Changed the version to `0.1.0-dev`: the version of an unreleased development state is
+  marked by the suffix `-dev`, like in FElupe.
+- Changed the development status of the package metadata from *Production/Stable* to
+  *Alpha* and added `numpy` and `scipy` to the required dependencies, which are imported
+  directly by this package.
+- Changed the titles of Ex. 2 (all faces) and Ex. 3 (sub-meshes), which were equal to
+  the title of Ex. 1, and moved all imports of the examples to their first cell.
 
 ### Removed
 - Removed `shape_function_quad()` and the hard-coded second derivative of the shape
@@ -110,3 +146,6 @@ All notable changes to this project will be documented in this file. The format 
   both contact surfaces are now evaluated by a single helper `unit_normals()`.
 - Removed the hand-written interpolation of the deformed coordinates at the integration
   points of the secondary surface in favour of `felupe.Field.interpolate()`.
+- Removed the workflow `publish-to-pypi.yml`, which built the package on each push and
+  published it on PyPI for each tag. The package is published on PyPI later.
+- Removed the configuration of isort in `pyproject.toml`, which is replaced by ruff.
