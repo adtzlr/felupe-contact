@@ -11,7 +11,7 @@ felupe-contact is an extension package for [FElupe](https://github.com/adtzlr/fe
 > felupe-contact is in an early stage of development. It is not available on PyPI yet and its API may change without a deprecation.
 
 ## ✨ Highlights
-- ✅ a frictionless [contact between the surfaces of solid bodies](https://felupe-contact.readthedocs.io/en/latest/felupe_contact.html#felupe_contact.SolidBodyContact) (surface-to-surface, penalty-based)
+- ✅ a [contact between the surfaces of solid bodies](https://felupe-contact.readthedocs.io/en/latest/felupe_contact.html#felupe_contact.SolidBodyContact) (surface-to-surface, penalty-based) with optional [Coulomb friction](https://felupe-contact.readthedocs.io/en/latest/howto/friction.html)
 - ✅ three-dimensional, plane strain and axisymmetric problems
 - ✅ all boundary regions of FElupe, i.e. faces with linear or quadratic shape functions
 - ✅ an item of FElupe, i.e. it is used in a `Step` and in a `Job` like a `SolidBody`

@@ -26,6 +26,8 @@ These classes and functions are used internally by :class:`~felupe_contact.Solid
    _solidbody_contact.sparse_vector
    _solidbody_contact.sparsity_pattern
    _solidbody_contact.sparse_matrix
+   _solidbody_contact.copy_statevars
+   _solidbody_contact.contiguous
    _element.BatchedElement
    _element.face_element
    _boundary.boundary_region
@@ -72,6 +74,10 @@ The building blocks of a model with a contact are taken from FElupe.
 .. autofunction:: felupe_contact._solidbody_contact.sparsity_pattern
 
 .. autofunction:: felupe_contact._solidbody_contact.sparse_matrix
+
+.. autofunction:: felupe_contact._solidbody_contact.copy_statevars
+
+.. autofunction:: felupe_contact._solidbody_contact.contiguous
 
 .. autoclass:: felupe_contact._element.BatchedElement
    :members:

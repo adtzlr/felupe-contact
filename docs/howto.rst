@@ -13,3 +13,4 @@ Step-by-step guides for specific tasks with a contact of felupe-contact in a mod
    howto/twodimensional
    howto/convergence
    howto/results
+   howto/friction

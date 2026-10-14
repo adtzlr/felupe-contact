@@ -108,6 +108,48 @@ All notable changes to this project will be documented in this file. The format 
   of FElupe, i.e. with its `main` branch. The workflow `upload-codecov.yml` runs it for
   Python 3.14 after the tests with the latest release of FElupe, i.e. changes of the API
   of FElupe are detected before they are released.
+- Added optional Coulomb friction to `SolidBodyContact` by the friction coefficient
+  `friction` (default is 0.0, i.e. frictionless; `np.inf` prevents sliding). The
+  tangential tractions are evaluated by a return mapping from the last converged
+  increment with an elastic (penalty) stick, like the friction of `ContactRigidPlane` of
+  FElupe. The anchor (stick point) of an integration point is a material point of the
+  primary surface, i.e. it moves with the primary surface. It is transferred to the
+  current face if the integration point slides over an edge of a face, and an
+  integration point which comes into contact within an increment is anchored at the
+  (interpolated) point of first contact. The tangential traction acts on the integration
+  point of the secondary surface and, equal and opposite, on the projected point of the
+  primary surface. The consistent stiffness matrix contains the change of the normal
+  vector, of the projected point and of the contact pressure. It is not symmetric, its
+  symmetric part is used with `symmetric=True`.
+- Added the arguments `elastic_slip` and `penalty_tangential` to `SolidBodyContact`.
+  The tangential penalty stiffness is proportional to the contact pressure, i.e. a
+  sticking integration point starts to slide at the allowable elastic slip (default is
+  one percent of the characteristic size of the faces), and it is limited by the normal
+  penalty stiffness. Hence, the tangential stiffness vanishes smoothly at the boundary
+  of a contact zone and it is not overestimated for large penetrations in the first
+  iterations of an increment. Alternatively, a constant tangential penalty stiffness is
+  given by `penalty_tangential`. Both are evaluated by
+  `SolidBodyContact.tangential_penalty()`.
+- Added the state variables of the friction to `SolidBodyContact.results.statevars`
+  (the anchors and the deformed coordinates of the last converged increment). The trial
+  state variables are accepted after a converged increment by FElupe, see
+  `felupe.mechanics.Results.update_statevars()`, and they are included in
+  `SolidBodyContact.checkpoint()` and restored by `SolidBodyContact.restore()`, i.e. on
+  a cutback of the `CutbackPlugin`. The tangential tractions and the mask of the sliding
+  integration points are stored in `SolidBodyContact.results.shear` and
+  `SolidBodyContact.results.slip`.
+- Added `ContactSurfacePair.anchors()`, `ContactSurfacePair.relocate()`,
+  `ContactSurfacePair.friction()`, `ContactSurfacePair.vector_friction()` and
+  `ContactSurfacePair.matrix_friction()`, which evaluate the friction of the face-pairs.
+  The anchors of sliding integration points are relocated exactly, i.e. the tangential
+  tractions are reproduced at the beginning of the next increment. The friction works on
+  C-contiguous copies of the contact kinematics, see `contiguous()`, which makes the
+  assembly of its stiffness matrix about twice as fast.
+- Added the tests `tests/test_friction.py` (incl. the tangent of the force vector for
+  all boundary regions, gross sliding on a stiff base with a tangential force of the
+  friction coefficient times the normal force and a cutback, which gives the same
+  result as smaller increments), the how-to guide *Friction* and Ex. 7, a rubber block
+  which is moved over a stiff base.
 
 ### Fixed
 - Fixed the connected bodies of a body with an enclosed cavity. The bodies were
@@ -198,6 +240,9 @@ All notable changes to this project will be documented in this file. The format 
   vector of a face (edge) of a two-dimensional mesh is its in-plane vector, rotated by
   minus 90 degrees.
 - Changed `closest_point_projection()` to take the element formulation of the faces.
+- Changed `ContactSurfacePair.kinematics()` to return also the deformed coordinates of
+  the integration points in contact and the natural element coordinates of their
+  projections, which are required by the friction.
   The second derivatives of the surface coordinates are now evaluated by the hessian of
   the shape functions of the faces instead of the constant mixed second derivative of a
   bilinear quad, i.e. curved faces are supported.

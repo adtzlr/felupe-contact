@@ -25,7 +25,7 @@ The contact is an item of FElupe, i.e. it is added to the items of a :class:`~fe
       :link: how-to
       :link-type: ref
 
-      Step-by-step guides for specific tasks, like the definition of the contact surfaces, two-dimensional problems or the convergence of the Newton-Raphson method.
+      Step-by-step guides for specific tasks, like the definition of the contact surfaces, two-dimensional problems, the convergence of the Newton-Raphson method or friction.
 
    .. grid-item-card:: 📚 Examples
       :link: examples
@@ -36,7 +36,7 @@ The contact is an item of FElupe, i.e. it is added to the items of a :class:`~fe
 .. admonition:: Highlights
    :class: admonition
 
-   + a frictionless :class:`contact between the surfaces of deformable solid bodies <felupe_contact.SolidBodyContact>` (surface-to-surface, penalty-based)
+   + a :class:`contact between the surfaces of deformable solid bodies <felupe_contact.SolidBodyContact>` (surface-to-surface, penalty-based) with optional :ref:`Coulomb friction <how-to-friction>`
 
    + an item of FElupe, i.e. it is used in a :class:`~felupe.Step`, a :class:`~felupe.Job` and a :class:`~felupe.CharacteristicCurve`, and with the :class:`~felupe.CutbackPlugin` and the :class:`~felupe.LinesearchPlugin`
 
@@ -84,7 +84,7 @@ FElupe contains contact formulations with rigid surfaces and a contact by a thir
     *   - :class:`~felupe_contact.SolidBodyContact`
         - felupe-contact
         - deformable solid bodies (surface-to-surface)
-        - no
+        - Coulomb
 
 Installation
 ------------
