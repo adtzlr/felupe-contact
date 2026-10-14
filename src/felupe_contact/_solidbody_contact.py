@@ -184,6 +184,57 @@ def sparse_matrix(values, pattern, dim):
     return pattern.assemble(values.reshape(n // dim, dim, n // dim, dim, npairs))
 
 
+def contiguous(arrays):
+    """Return a dict with C-contiguous arrays.
+
+    Parameters
+    ----------
+    arrays : dict
+        A dict with arrays, e.g. the contact kinematics.
+
+    Returns
+    -------
+    dict
+        A dict with the C-contiguous arrays (copies of the arrays which are not
+        contiguous).
+
+    Notes
+    -----
+    The arrays of the face-pairs in contact are selected from the candidate face-pairs
+    of the contact search by advanced indexing of their last axis. This results in
+    arrays which are not contiguous in memory, which slows down the contractions by
+    :func:`numpy.einsum` significantly.
+    """
+
+    return {key: np.ascontiguousarray(value) for key, value in arrays.items()}
+
+
+def copy_statevars(statevars):
+    """Return a copy of the state variables of the friction.
+
+    Parameters
+    ----------
+    statevars : dict or None
+        The state variables of the friction, i.e. the deformed coordinates ``points``
+        of the mesh and the lists ``face`` and ``coordinates`` with the anchors of each
+        surface pair, or None for a frictionless contact.
+
+    Returns
+    -------
+    dict or None
+        A copy of the state variables.
+    """
+
+    if statevars is None:
+        return None
+
+    return {
+        "points": statevars["points"].copy(),
+        "face": [face.copy() for face in statevars["face"]],
+        "coordinates": [xi.copy() for xi in statevars["coordinates"]],
+    }
+
+
 def closest_point_projection(points, vertices, element, maxiter=12, tol=1e-10):
     r"""Return the natural element coordinates of the closest-point projections of
     points onto the faces of a surface.
@@ -883,7 +934,13 @@ class ContactSurfacePair:
         Returns
         -------
         dict or None
-            A dict with the contact kinematics of the active integration points. None
+            A dict with the contact kinematics of the active integration points, i.e.
+            the integration points ``point``, the faces of the primary surface
+            ``face``, the deformed coordinates of the integration points ``points``,
+            the natural element coordinates of their projections ``coordinates``, the
+            gaps, the outward unit normal vectors and the tangent vectors, the metric
+            and the curvature of the primary surface and the shape functions ``h`` and
+            their gradients ``dhdr`` of the primary surface at the projections. None
             is returned if no integration point is in contact.
 
         Notes
@@ -1027,6 +1084,8 @@ class ContactSurfacePair:
         return {
             "point": point,
             "face": face,
+            "points": points[:, point],
+            "coordinates": coordinates[:, best],
             "gap": gap,
             "normal": normal,
             "tangents": a,
@@ -1341,10 +1400,587 @@ class ContactSurfacePair:
 
         return sparse_matrix(values, pattern, self.dim)
 
+    def anchors(self, kinematics, statevars):
+        r"""Return the anchors (stick points) of the integration points in contact,
+        given as faces of the primary surface and natural element coordinates, along
+        with the fraction of the increment after the first contact.
+
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+        statevars : dict
+            The state variables of the last converged increment, i.e. the deformed
+            coordinates of all points of the mesh ``points``, the faces of the anchors
+            ``face`` of all integration points of the secondary surface (-1 for an
+            integration point which is not in contact) and the natural element
+            coordinates of the anchors ``coordinates``.
+
+        Returns
+        -------
+        face : ndarray of shape (npairs,)
+            The faces of the primary surface of the anchors, i.e. the faces of the
+            projected points.
+        coordinates : ndarray of shape (dim - 1, npairs)
+            The natural element coordinates of the anchors.
+        scale : ndarray of shape (npairs,)
+            The fraction :math:`s` of the increment after the first contact, see Eq.
+            :eq:`friction-first-contact`.
+        dscale : ndarray of shape (npairs,)
+            The derivative of the fraction w.r.t. the gap.
+
+        Notes
+        -----
+        An anchor is a material point of the primary surface, given on the face to
+        which the integration point is assigned now. The anchor of an integration point
+        which is already in contact at the beginning of the increment is taken from the
+        state variables. If the integration point has slid over an edge of a face, its
+        anchor is located on another face. Then, the anchor is transferred to the
+        current face by the projection of its converged position on the converged
+        current face. Hence, the anchor is fixed within the increment and the
+        linearization is exact.
+
+        An integration point which comes into contact within the increment is anchored
+        at the projection of its converged position on the converged current face. Its
+        elastic slip is scaled by the fraction :math:`s` of the increment after the
+        (linearly interpolated) first contact, where the gap is zero, see Eq.
+        :eq:`friction-first-contact`, with the gap :math:`g_n` of the converged
+        position w.r.t. the converged current face. This avoids friction forces from
+        the tangential movement before the contact is established, also for large
+        increments. The same approach is used by :class:`felupe.ContactRigidPlane`.
+
+        ..  math::
+            :label: friction-first-contact
+
+            s = \begin{cases}
+                \dfrac{-g}{g_n - g} & g_n > 0 \\
+                1 & \text{else}
+            \end{cases}
+        """
+
+        point, face, gap = kinematics["point"], kinematics["face"], kinematics["gap"]
+
+        anchor = statevars["face"][point]
+        coordinates = statevars["coordinates"][:, point]
+
+        scale = np.ones_like(gap)
+        dscale = np.zeros_like(gap)
+
+        # the anchors which are not located on the current face, i.e. of the new
+        # integration points (no anchor) or of integration points which have slid over
+        # an edge of a face
+        new = anchor < 0
+        transfer = anchor != face
+
+        if not np.any(transfer):
+            return anchor, coordinates, scale, dscale
+
+        x = statevars["points"]
+        source = np.zeros((self.dim, np.count_nonzero(transfer)))
+        is_new = new[transfer]
+
+        # the converged positions of the new integration points
+        if np.any(new):
+            q, c = np.divmod(point[new], self.ncells)
+            vertices = self.vertices(x, self.cells_faces[c])
+            source[:, is_new] = np.einsum("ap,aip->ip", self.h[:, q], vertices)
+
+        # the converged positions of the anchors on another face
+        other = transfer & ~new
+
+        if np.any(other):
+            vertices = self.vertices(x, self.cells_faces_primary[anchor[other]])
+            h = self.element_primary.function(coordinates[:, other])
+            source[:, ~is_new] = np.einsum("ap,aip->ip", h, vertices)
+
+        # the projections on the converged current faces
+        vertices = self.vertices(x, self.cells_faces_primary[face[transfer]])
+        xi = closest_point_projection(source, vertices, self.element_primary)[0]
+
+        anchor[transfer] = face[transfer]
+        coordinates[:, transfer] = xi
+
+        if np.any(new):
+            # the converged gaps of the new integration points
+            vertices = vertices[..., is_new]
+            h, dhdr, _ = self.element_primary.evaluate(xi[:, is_new])
+            normal = unit_normals(
+                np.einsum("aJp,aip->Jip", dhdr, vertices),
+                self.orientation_primary[face[new]],
+            )
+            gap_n = dot(
+                source[:, is_new] - np.einsum("ap,aip->ip", h, vertices),
+                normal,
+                mode=(1, 1),
+            )
+
+            # the fraction of the increment after the first contact
+            g = gap[new]
+            first = gap_n > 0
+            s, ds = np.ones_like(g), np.zeros_like(g)
+
+            s[first] = -g[first] / (gap_n[first] - g[first])
+            ds[first] = -gap_n[first] / (gap_n[first] - g[first]) ** 2
+
+            scale[new], dscale[new] = s, ds
+
+        return anchor, coordinates, scale, dscale
+
+    def relocate(self, points, vertices, tangents, coordinates, maxiter=8, tol=1e-12):
+        r"""Return the natural element coordinates of the anchors on the faces of the
+        primary surface, which are located at given points in the tangent planes of
+        the projected points.
+
+        Parameters
+        ----------
+        points : ndarray of shape (dim, npairs)
+            The points :math:`\bar{\boldsymbol{x}} - \boldsymbol{e}_{ref}` in the
+            tangent planes of the projected points.
+        vertices : ndarray of shape (npoints_per_face, dim, npairs)
+            The deformed coordinates of the points of the faces of the primary surface.
+        tangents : ndarray of shape (dim - 1, dim, npairs)
+            The tangent vectors :math:`\boldsymbol{a}_\alpha` at the projected points.
+        coordinates : ndarray of shape (dim - 1, npairs)
+            The initial natural element coordinates of the anchors.
+        maxiter : int, optional
+            The maximum number of local Newton iterations (default is 8).
+        tol : float, optional
+            The tolerance for the local Newton iterations (default is 1e-12).
+
+        Returns
+        -------
+        ndarray of shape (dim - 1, npairs)
+            The natural element coordinates of the anchors.
+
+        Notes
+        -----
+        The tangential part of the relative position of an anchor
+        :math:`\hat{\boldsymbol{x}}(\xi_{ref})` and a given point
+        :math:`\boldsymbol{y}` is zero, see Eq. :eq:`friction-relocate`, i.e. the
+        elastic slip of an integration point w.r.t. its new anchor is the
+        return-mapped elastic slip :math:`\boldsymbol{e}_{ref}` for
+        :math:`\boldsymbol{y} = \bar{\boldsymbol{x}} - \boldsymbol{e}_{ref}`. The
+        equation is solved by a few Newton iterations, where the initial coordinates
+        are the first-order estimate :math:`\xi^\alpha - a^{\alpha\beta}\
+        \boldsymbol{a}_\beta \cdot \boldsymbol{e}_{ref}`.
+
+        ..  math::
+            :label: friction-relocate
+
+            \boldsymbol{a}_\alpha \cdot \left(
+                \boldsymbol{y} - \hat{\boldsymbol{x}}(\xi_{ref})
+            \right) = 0
+        """
+
+        coordinates = np.clip(coordinates, -2.0, 2.0)
+        element = self.element_primary
+
+        for _ in range(maxiter):
+            x = np.einsum("ap,aip->ip", element.function(coordinates), vertices)
+            a = np.einsum("aJp,aip->Jip", element.gradient(coordinates), vertices)
+
+            residual = np.einsum("Jip,ip->Jp", tangents, points - x)
+            jacobian = np.einsum("Jip,Kip->JKp", tangents, a)
+
+            step = np.einsum("JKp,Kp->Jp", inv(jacobian), residual)
+            coordinates = np.clip(coordinates + step, -2.0, 2.0)
+
+            if np.all(np.abs(step) < tol):
+                break
+
+        return coordinates
+
+    def friction(
+        self, kinematics, statevars, x, pressure, dpressure, stiffness, friction
+    ):
+        r"""Return the tangential contact tractions of a Coulomb friction law, evaluated
+        by a return mapping from the state of the last converged increment, together
+        with the trial anchors.
+
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+        statevars : dict
+            The state variables of the last converged increment, see :meth:`anchors`.
+        x : ndarray of shape (npoints, dim)
+            The deformed coordinates of all points of the mesh.
+        pressure : ndarray of shape (npairs,)
+            The contact pressure :math:`p`.
+        dpressure : ndarray of shape (npairs,)
+            The derivative of the contact pressure w.r.t. the gap.
+        stiffness : tuple of ndarray of shape (npairs,)
+            The tangential penalty stiffness :math:`\epsilon_t` as tangential traction
+            per unit elastic slip and its derivative w.r.t. the gap, see
+            :meth:`SolidBodyContact.tangential_penalty()
+            <felupe_contact.SolidBodyContact.tangential_penalty>`.
+        friction : float
+            The friction coefficient :math:`\mu`. An infinite friction coefficient
+            prevents sliding.
+
+        Returns
+        -------
+        dict
+            A dict with the tangential tractions ``traction`` of shape ``(dim,
+            npairs)``, the mask of sliding integration points ``slide``, the trial
+            anchors ``face`` and ``coordinates`` for the next increment and the
+            intermediate results which are required by :meth:`matrix_friction`.
+
+        Notes
+        -----
+        The anchor (stick point) of an integration point is a material point
+        :math:`\bar{\boldsymbol{x}}_{ref}` of the primary surface, see :meth:`anchors`.
+        The trial elastic slip is the tangential part of the relative position of the
+        integration point and its anchor, see Eq. :eq:`friction-elastic-slip`. For a
+        rigid primary surface, which doesn't rotate, this is the elastic slip of
+        :class:`felupe.ContactRigidPlane`.
+
+        ..  math::
+            :label: friction-elastic-slip
+
+            \boldsymbol{P}_t &= \boldsymbol{1} - \boldsymbol{n} \otimes \boldsymbol{n}
+
+            \boldsymbol{e} &= s\ \boldsymbol{P}_t \left(
+                \boldsymbol{x} - \bar{\boldsymbol{x}}_{ref} \right)
+
+        The trial tangential traction is checked against the Coulomb limit, see Eq.
+        :eq:`friction-return-mapping`. If the limit is exceeded, the integration point
+        slides and the traction is projected on the limit.
+
+        ..  math::
+            :label: friction-return-mapping
+
+            \boldsymbol{t}_t^{trial} &= \epsilon_t\ \boldsymbol{e}
+
+            \boldsymbol{t}_t &= \begin{cases}
+                \boldsymbol{t}_t^{trial} & |\boldsymbol{t}_t^{trial}| \le \mu\ p
+                    \quad \text{(stick)} \\
+                \mu\ p\ \dfrac{\boldsymbol{e}}{|\boldsymbol{e}|} & \text{else}
+                    \quad \text{(slide)}
+            \end{cases}
+
+        The anchor of a sticking integration point is kept. For a sliding integration
+        point (or one which comes into contact), the new anchor is located on the
+        current face at the return-mapped elastic slip :math:`\boldsymbol{e}_{ref} =
+        \boldsymbol{t}_t / \epsilon_t` behind the projected point
+        :math:`\bar{\boldsymbol{x}}`, see :meth:`relocate`. Hence, the elastic slip
+        w.r.t. the new anchor is :math:`\boldsymbol{e}_{ref}` and a sliding
+        integration point is located on the limit for unchanged displacements. The new
+        anchors are the trial state variables, i.e. they become the anchors of the next
+        increment if the increment converges.
+
+        The state variables are the anchors of the last converged increment, see
+        :meth:`anchors`. Hence, the tangential tractions are functions of the
+        displacements within an increment. An integration point, which is located on
+        the limit, sticks. This is the case at the beginning of an increment for an
+        integration point which slides in the last converged increment.
+        """
+
+        kinematics = contiguous(kinematics)
+
+        point, face = kinematics["point"], kinematics["face"]
+        normal = kinematics["normal"]
+
+        # the converged anchors of the integration points: a negative face denotes an
+        # integration point which was not in contact in the last converged increment
+        anchored = statevars["face"][point] >= 0
+        anchor, coordinates, scale, dscale = self.anchors(kinematics, statevars)
+
+        # the deformed coordinates of the anchors, which move with the faces of the
+        # primary surface
+        h_ref = self.element_primary.function(coordinates)
+        vertices = self.vertices(x, self.cells_faces_primary[anchor])
+        x_ref = np.einsum("ap,aip->ip", h_ref, vertices)
+
+        # the relative position of the integration points and their anchors and the
+        # (trial) elastic slip
+        w = kinematics["points"] - x_ref
+        nw = np.einsum("ip,ip->p", normal, w)
+        e0 = w - normal * nw
+        e = scale * e0
+
+        # the trial tangential traction
+        stiffness, dstiffness = stiffness
+        trial = stiffness * e
+        norm_trial = norm(trial, axis=0)
+
+        # the integration points which slide: the trial traction exceeds the limit
+        limit = friction * pressure
+        slide = np.zeros(len(point), dtype=bool)
+
+        # a relative tolerance assigns an integration point, which is located on the
+        # limit, e.g. at the beginning of an increment, to the sticking ones
+        if np.isfinite(friction):
+            slide = norm_trial > (1 + np.sqrt(np.finfo(float).eps)) * limit
+
+        # return mapping of the tangential traction and of the elastic slip
+        traction = trial.copy()
+        e_ref = e.copy()
+
+        if np.any(slide):
+            ratio = limit[slide] / norm_trial[slide]
+            traction[:, slide] *= ratio
+            e_ref[:, slide] *= ratio
+
+        # the contravariant tangent vectors. the inverse of a tensor is not contiguous
+        # in memory, which slows down the contractions by einsum
+        inverse_metric = np.ascontiguousarray(inv(kinematics["metric"]))
+        contravariant = np.einsum(
+            "JKp,Kip->Jip", inverse_metric, kinematics["tangents"]
+        )
+
+        # the trial anchors: a sticking integration point keeps its anchor, otherwise
+        # the anchor is located on the current face behind the projected point
+        keep = ~slide & anchored
+        coordinates_new = coordinates.copy()
+
+        if not np.all(keep):
+            move = ~keep
+            coordinates_new[:, move] = self.relocate(
+                points=kinematics["points"][:, move]
+                - kinematics["gap"][move] * normal[:, move]
+                - e_ref[:, move],
+                vertices=vertices[..., move],
+                tangents=kinematics["tangents"][..., move],
+                coordinates=kinematics["coordinates"][:, move]
+                - np.einsum("Jip,ip->Jp", contravariant[..., move], e_ref[:, move]),
+            )
+
+        return {
+            "traction": traction,
+            "slide": slide,
+            "face": face,
+            "coordinates": coordinates_new,
+            "e": e,
+            "e0": e0,
+            "w": w,
+            "nw": nw,
+            "scale": scale,
+            "dscale": dscale,
+            "h_ref": h_ref,
+            "stiffness": stiffness,
+            "dstiffness": dstiffness,
+            "limit": limit,
+            "dpressure": dpressure,
+            "friction": friction,
+            "contravariant": contravariant,
+        }
+
+    def vector_friction(self, kinematics, results):
+        r"""Return the friction force vectors of the face-pairs.
+
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+        results : dict
+            The results of the friction law, see :meth:`friction`.
+
+        Returns
+        -------
+        ndarray of shape (nvars + nvars_primary, npairs)
+            The friction force vectors of the face-pairs, given for the degrees of
+            freedom of :meth:`dofs`.
+
+        Notes
+        -----
+        The tangential traction acts on the integration point of the secondary surface
+        and, equal and opposite, on the material point of the primary surface at the
+        projection, see Eq. :eq:`friction-weak-form`.
+
+        ..  math::
+            :label: friction-weak-form
+
+            \delta W_t = \int_{\Gamma} \boldsymbol{t}_t \cdot \left(
+                \delta \boldsymbol{u} - \delta \bar{\boldsymbol{u}}
+            \right)\ d\Gamma
+        """
+
+        point = kinematics["point"]
+        npairs = len(point)
+
+        q, c = np.divmod(point, self.ncells)
+        dA = self.weight * self.dA[q, c]
+
+        traction = results["traction"]
+
+        return dA * np.concatenate(
+            [
+                dya(self.h[:, q], traction, mode=1).reshape(self.nvars, npairs),
+                -dya(kinematics["h"], traction, mode=1).reshape(
+                    self.nvars_primary, npairs
+                ),
+            ]
+        )
+
+    def matrix_friction(self, kinematics, results, geometric=True, symmetric=False):
+        r"""Return the friction stiffness matrices of the face-pairs.
+
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+        results : dict
+            The results of the friction law, see :meth:`friction`.
+        geometric : bool, optional
+            Flag to add the geometric part of the friction stiffness matrix, i.e. the
+            change of the normal vector and of the projected point (default is True).
+        symmetric : bool, optional
+            Flag to return the symmetric part of the friction stiffness matrix
+            (default is False).
+
+        Returns
+        -------
+        ndarray of shape (nvars + nvars_primary, nvars + nvars_primary, npairs)
+            The friction stiffness matrices of the face-pairs, given for the degrees of
+            freedom of :meth:`dofs`. The rows are the test- and the columns are the
+            trial-functions.
+
+        Notes
+        -----
+        The linearization of the elastic slip, see Eq.
+        :eq:`friction-elastic-slip-linearization`, contains the change of the
+        relative position :math:`\boldsymbol{w} = \boldsymbol{x} -
+        \bar{\boldsymbol{x}}_{ref}` and of the unit normal vector. The latter follows
+        from the change of the natural element coordinates of the projection,
+        :math:`\Delta \xi^\alpha = H^{\alpha\beta} (\Delta B_\beta + g\ \Delta
+        A_\beta)`, see :meth:`matrix`.
+
+        ..  math::
+            :label: friction-elastic-slip-linearization
+
+            \Delta \boldsymbol{e} &= s \left(
+                \boldsymbol{P}_t\ \Delta \boldsymbol{w}
+                - (\boldsymbol{n} \cdot \boldsymbol{w})\ \Delta \boldsymbol{n}
+                - \boldsymbol{n} \otimes \boldsymbol{w} \cdot \Delta \boldsymbol{n}
+            \right) + \boldsymbol{P}_t\ \boldsymbol{w}\ \frac{\partial s}{\partial g}\
+                \Delta g
+
+            \Delta \boldsymbol{n} &= -\boldsymbol{a}^\alpha \left(
+                \Delta A_\alpha + \kappa_{\alpha\beta}\ \Delta \xi^\beta \right)
+
+        The linearization of the tangential traction is given in Eq.
+        :eq:`friction-traction-linearization` for sticking and for sliding integration
+        points, with :math:`\hat{\boldsymbol{t}} = \boldsymbol{e} / |\boldsymbol{e}|`.
+
+        ..  math::
+            :label: friction-traction-linearization
+
+            \Delta \boldsymbol{t}_t &= \epsilon_t\ \Delta \boldsymbol{e}
+                + \boldsymbol{e}\ \Delta \epsilon_t \quad \text{(stick)}
+
+            \Delta \boldsymbol{t}_t &= \frac{\mu\ p}{|\boldsymbol{e}|} \left(
+                \boldsymbol{1} - \hat{\boldsymbol{t}} \otimes \hat{\boldsymbol{t}}
+            \right) \Delta \boldsymbol{e} + \mu\ \hat{\boldsymbol{t}}\ \Delta p
+                \quad \text{(slide)}
+
+        The stiffness matrix of a face-pair follows from the linearization of the
+        virtual work :eq:`friction-weak-form`, which includes the change of the shape
+        functions of the primary surface at the projected point. It is not symmetric.
+        """
+
+        kinematics = contiguous(kinematics)
+
+        point = kinematics["point"]
+        normal = kinematics["normal"]
+        npairs = len(point)
+        nsurface = self.dim - 1
+
+        q, c = np.divmod(point, self.ncells)
+        dA = self.weight * self.dA[q, c]
+
+        h, hp = self.h[:, q], kinematics["h"]
+
+        b, A, B = self.variations(kinematics)
+        b = np.concatenate(b)
+
+        # the change of the relative position of the integration point and its anchor
+        identity = np.eye(self.dim)
+        W = np.concatenate(
+            [
+                np.einsum("ap,ij->iajp", h, identity).reshape(
+                    self.dim, self.nvars, npairs
+                ),
+                -np.einsum("ap,ij->iajp", results["h_ref"], identity).reshape(
+                    self.dim, self.nvars_primary, npairs
+                ),
+            ],
+            axis=1,
+        )
+
+        # the change of the elastic slip
+        E = W - normal[:, None] * np.einsum("ip,ivp->vp", normal, W)
+
+        if geometric:
+            gap = kinematics["gap"]
+            metric = kinematics["metric"]
+            curvature = kinematics["curvature"]
+
+            # the change of the natural element coordinates of the projection and of
+            # the unit normal vector. the variation A is zero for the secondary surface
+            zeros = np.zeros((nsurface, self.nvars, npairs))
+            A = np.concatenate([zeros, A], axis=1)
+            B = np.concatenate(B, axis=1)
+
+            # the inverse of a tensor is not contiguous in memory
+            inverse_H = np.ascontiguousarray(inv(metric - gap * curvature))
+            Xi = np.einsum("JKp,Kvp->Jvp", inverse_H, B + gap * A)
+            N = -np.einsum(
+                "Jip,Jvp->ivp",
+                results["contravariant"],
+                A + np.einsum("JKp,Kvp->Jvp", curvature, Xi),
+            )
+
+            w = results["w"]
+            E -= results["nw"] * N + normal[:, None] * np.einsum("ip,ivp->vp", w, N)
+
+        E = results["scale"] * E + results["e0"][:, None] * (results["dscale"] * b)
+
+        # the change of the tangential traction, sticking integration points
+        e = results["e"]
+        T = results["stiffness"] * E + e[:, None] * (results["dstiffness"] * b)
+
+        # sliding integration points
+        slide = results["slide"]
+
+        if np.any(slide):
+            es = e[:, slide]
+            es_norm = norm(es, axis=0)
+            direction = es / es_norm
+            Es = E[..., slide]
+
+            dp = results["dpressure"][slide] * b[:, slide]
+            T[..., slide] = results["friction"] * direction[:, None] * dp + (
+                results["limit"][slide] / es_norm
+            ) * (Es - direction[:, None] * np.einsum("ip,ivp->vp", direction, Es))
+
+        # the rows of the secondary (test) and of the primary surface
+        K = np.concatenate(
+            [
+                np.einsum("ap,ivp->aivp", h, T).reshape(self.nvars, -1, npairs),
+                -np.einsum("ap,ivp->aivp", hp, T).reshape(
+                    self.nvars_primary, -1, npairs
+                ),
+            ]
+        )
+
+        # the change of the shape functions of the primary surface at the projection
+        if geometric:
+            K[self.nvars :] -= np.einsum(
+                "aJp,ip,Jvp->aivp", kinematics["dhdr"], results["traction"], Xi
+            ).reshape(self.nvars_primary, -1, npairs)
+
+        K *= dA
+
+        if symmetric:
+            K = (K + K.transpose(1, 0, 2)) / 2
+
+        return K
+
 
 class SolidBodyContact:
-    r"""A frictionless contact between the surfaces of two solid bodies, formulated for
-    three-dimensional, plane strain and axisymmetric problems.
+    r"""A contact between the surfaces of two solid bodies with optional Coulomb
+    friction, formulated for three-dimensional, plane strain and axisymmetric problems.
 
     Parameters
     ----------
@@ -1429,14 +2065,41 @@ class SolidBodyContact:
     mask_primary : ndarray of bool or None, optional
         A mask of the points of the mesh of the primary solid body, see ``mask``
         (default is None).
+    friction : float, optional
+        The Coulomb friction coefficient :math:`\mu` (default is 0.0). A friction
+        coefficient of zero is a frictionless contact. An infinite friction coefficient,
+        i.e. ``np.inf``, prevents sliding (a rough contact).
+    elastic_slip : float or None, optional
+        The allowable elastic slip :math:`\gamma` (a length) of sticking integration
+        points (default is None). The tangential penalty stiffness is proportional to
+        the contact pressure, see Eq. :eq:`friction-penalty`, i.e. a sticking
+        integration point starts to slide at an elastic slip of :math:`\gamma`,
+        independent of the contact pressure. If None, one percent of the
+        characteristic size of the faces of the contact surfaces is used, unless
+        ``penalty_tangential`` is given. Decrease it to reduce the elastic slip and
+        increase it if the Newton-Raphson method does not converge.
+    penalty_tangential : float or None, optional
+        A constant tangential penalty stiffness :math:`\epsilon_t` as tangential
+        traction per unit elastic slip (default is None). If given, it replaces the
+        pressure-proportional tangential penalty stiffness of ``elastic_slip``, i.e.
+        both must not be given.
+    symmetric : bool, optional
+        Flag to use the symmetric part of the stiffness matrix of the friction
+        (default is False). The consistent stiffness matrix of the friction is not
+        symmetric. Its symmetric part degrades the rate of convergence, but it enables
+        solvers for symmetric matrices.
 
     Attributes
     ----------
     penalty : float or None
         The penalty stiffness. This is None until it is estimated on the first assembly.
+    elastic_slip : float or None
+        The allowable elastic slip of the friction. This is None for a constant
+        tangential penalty stiffness.
     results : Results
-        The results of the contact, e.g. the gap and the contact pressure at the
-        integration points of the secondary surface.
+        The results of the contact, e.g. the gap, the contact pressure and the
+        tangential contact traction (shear) at the integration points of the secondary
+        surface.
 
     Notes
     -----
@@ -1493,6 +2156,61 @@ class SolidBodyContact:
         \epsilon = \text{scale} \cdot \min{\left(
             \frac{\bar{k}}{\bar{a}},\ \frac{\bar{k}_{primary}}{\bar{a}_{primary}}
         \right)}
+
+    With a positive friction coefficient :math:`\mu`, the tangential contact
+    tractions follow a Coulomb friction law with an elastic (penalty) stick and a
+    return mapping, like the friction of :class:`~felupe.ContactRigidPlane`. The
+    anchor (stick point) of an integration point of the secondary surface is a
+    material point :math:`\bar{\boldsymbol{x}}_{ref}` of the primary surface, i.e. it
+    moves with the primary surface. The elastic slip :math:`\boldsymbol{e}` is the
+    tangential part of the relative position of the integration point and its anchor,
+    see Eq. :eq:`friction-slip`.
+
+    ..  math::
+        :label: friction-slip
+
+        \boldsymbol{e} = \left(
+            \boldsymbol{1} - \boldsymbol{n} \otimes \boldsymbol{n}
+        \right) \left( \boldsymbol{x} - \bar{\boldsymbol{x}}_{ref} \right)
+
+    The tangential penalty stiffness :math:`\epsilon_t` is proportional to the
+    contact pressure, see Eq. :eq:`friction-penalty`, where :math:`\gamma` is the
+    allowable elastic slip. Hence, the tangential stiffness vanishes smoothly with the
+    contact pressure, e.g. at the boundary of a contact zone. The tangential penalty
+    stiffness is limited by the (normal) penalty stiffness. This limit is only active
+    for large penetrations, e.g. in the first iterations of an increment, in which a
+    contact is established. Alternatively, a constant tangential penalty stiffness is
+    given by ``penalty_tangential``.
+
+    ..  math::
+        :label: friction-penalty
+
+        \epsilon_t = \min{\left( \frac{\mu\ p}{\gamma},\ \epsilon \right)}
+
+    The trial traction :math:`\boldsymbol{t}_t^{trial} = \epsilon_t\ \boldsymbol{e}`
+    is checked against the Coulomb limit, see Eq. :eq:`friction-coulomb`. A sliding
+    integration point is projected on the limit and its anchor is moved behind the
+    projected point, i.e. the elastic slip of the next increment is the return-mapped
+    elastic slip. The anchors are the state variables of the friction. They are only
+    updated after a converged increment, see
+    :meth:`ContactSurfacePair.friction()
+    <felupe_contact._solidbody_contact.ContactSurfacePair.friction>`.
+
+    ..  math::
+        :label: friction-coulomb
+
+        \boldsymbol{t}_t = \begin{cases}
+            \boldsymbol{t}_t^{trial} & |\boldsymbol{t}_t^{trial}| \le \mu\ p
+                \quad \text{(stick)} \\
+            \mu\ p\ \dfrac{\boldsymbol{e}}{|\boldsymbol{e}|} & \text{else}
+                \quad \text{(slide)}
+        \end{cases}
+
+    The tangential traction acts on the integration point of the secondary surface and,
+    equal and opposite, on the projected point of the primary surface. The consistent
+    stiffness matrix of the friction is not symmetric, see
+    :meth:`ContactSurfacePair.matrix_friction()
+    <felupe_contact._solidbody_contact.ContactSurfacePair.matrix_friction>`.
 
     A face-pair is only considered by the contact search if it is able to touch: faces
     which share at least one point are neighbours and are never in contact, faces which
@@ -1589,8 +2307,15 @@ class SolidBodyContact:
         subdivides only the substeps which fail to converge, and optionally a
         :class:`~felupe.LinesearchPlugin`, e.g. ``fem.Job(steps,
         plugins=[fem.CutbackPlugin(), fem.LinesearchPlugin()])``. The state of the
-        contact search is restored on a cutback by :meth:`checkpoint` and
-        :meth:`restore`.
+        contact search and the anchors of the friction are restored on a cutback by
+        :meth:`checkpoint` and :meth:`restore`.
+
+    ..  hint::
+
+        A frictional contact is path-dependent. The transition from sticking to
+        sliding of a whole contact zone (gross sliding) is the most demanding part for
+        the Newton-Raphson method. Use smaller load increments there or add a
+        :class:`~felupe.CutbackPlugin`. See :ref:`how-to-friction` for an example.
 
     Examples
     --------
@@ -1733,7 +2458,25 @@ class SolidBodyContact:
         geometric_stiffness=True,
         mask=None,
         mask_primary=None,
+        friction=0.0,
+        elastic_slip=None,
+        penalty_tangential=None,
+        symmetric=False,
     ):
+        if not friction >= 0:
+            raise ValueError("The friction coefficient must not be negative.")
+
+        if penalty_tangential is not None and not penalty_tangential > 0:
+            raise ValueError("The tangential penalty stiffness must be positive.")
+
+        if elastic_slip is not None and not elastic_slip > 0:
+            raise ValueError("The elastic slip must be positive.")
+
+        if penalty_tangential is not None and elastic_slip is not None:
+            raise ValueError(
+                "Either `penalty_tangential` or `elastic_slip` may be given, not both."
+            )
+
         bodies = [field] if field_primary is None else [field, field_primary]
 
         # the contact surfaces, i.e. field containers on boundary regions. for a solid
@@ -1763,6 +2506,9 @@ class SolidBodyContact:
         self.facing = facing
         self.self_contact = self_contact
         self.geometric_stiffness = geometric_stiffness
+        self.friction = friction
+        self.penalty_tangential = penalty_tangential
+        self.symmetric = symmetric
 
         if items is None and penalty is None:
             raise ValueError(
@@ -1805,6 +2551,12 @@ class SolidBodyContact:
         if max_distance is None:
             self.max_distance = 5 * self.size
 
+        # the tangential penalty stiffness is proportional to the contact pressure,
+        # unless a constant tangential penalty stiffness is given
+        self.elastic_slip = elastic_slip
+        if elastic_slip is None and penalty_tangential is None:
+            self.elastic_slip = 1e-2 * self.size
+
         if self_contact:
             self._check_self_contact()
 
@@ -1812,9 +2564,25 @@ class SolidBodyContact:
         self.results = Results()
         self.results.gap = []
         self.results.pressure = []
+        self.results.shear = []
+        self.results.slip = []
         self.results.npoints_in_contact = 0
 
+        # the state variables of the friction, i.e. the deformed coordinates of the
+        # points of the mesh and the anchors of the integration points of the last
+        # converged increment (no integration point is in contact initially)
+        if self.friction > 0:
+            self.results.statevars = {
+                "points": self.field.region.mesh.points + self.field[0].values,
+                "face": [np.full(pair.dV.size, -1) for pair in self.pairs],
+                "coordinates": [
+                    np.zeros((pair.dim - 1, pair.dV.size)) for pair in self.pairs
+                ],
+            }
+
         self._kinematics = None
+        self._friction = None
+        self._state = None
         self._values = None
         self._pattern = None
 
@@ -1823,8 +2591,14 @@ class SolidBodyContact:
         penalty = f"  Penalty stiffness: {self.penalty}"
         smoothing = f"  Smoothing: {self.smoothing}"
         contact = f"  Integration points in contact: {self.results.npoints_in_contact}"
+        lines = [header, penalty, smoothing, contact]
 
-        return "\n".join([header, penalty, smoothing, contact])
+        if self.friction > 0:
+            nslip = sum([0 if s is None else int(s.sum()) for s in self.results.slip])
+            lines.insert(3, f"  Friction coefficient: {self.friction}")
+            lines.append(f"  Integration points sliding: {nslip}")
+
+        return "\n".join(lines)
 
     def _check_self_contact(self):
         """Warn if integration points are in contact with their own body in the
@@ -1860,9 +2634,10 @@ class SolidBodyContact:
         dict
             A dict with copies of the faces of the primary surface, to which the
             integration points of the secondary surface are assigned by the last
-            evaluation (for each surface pair), and of the results of the contact, i.e.
-            the gaps, the contact pressures and the number of integration points in
-            contact.
+            evaluation (for each surface pair), of the state variables of the friction
+            and of the results of the contact, i.e. the gaps, the contact pressures,
+            the tangential tractions, the sliding integration points and the number of
+            integration points in contact.
 
         Notes
         -----
@@ -1874,6 +2649,12 @@ class SolidBodyContact:
         is restored, i.e. the contact search of the next attempt doesn't start with the
         faces of the failed attempt.
 
+        The state variables of the friction (the anchors of the integration points and
+        the deformed coordinates of the last converged increment) are only updated
+        after a converged increment. They are included in the checkpoint, because a
+        cutback restores the last converged increment of the checkpoint, which is not
+        necessarily the last converged increment of the Newton-Raphson method.
+
         The penalty stiffness is not included in the checkpoint, i.e. an estimated
         penalty stiffness is kept constant.
 
@@ -1884,8 +2665,11 @@ class SolidBodyContact:
 
         return {
             "faces": [pair.face.copy() for pair in self.pairs],
+            "statevars": copy_statevars(self.results.statevars),
             "gap": list(self.results.gap),
             "pressure": list(self.results.pressure),
+            "shear": list(self.results.shear),
+            "slip": list(self.results.slip),
             "npoints_in_contact": self.results.npoints_in_contact,
         }
 
@@ -1900,22 +2684,29 @@ class SolidBodyContact:
 
         Notes
         -----
-        The cached contact kinematics, the assembled force vector and the assembled
-        stiffness matrix belong to the evaluation before the restore and are reset, i.e.
-        the contact kinematics are re-evaluated on the next assembly.
+        The cached contact kinematics, the trial state variables of the friction, the
+        assembled force vector and the assembled stiffness matrix belong to the
+        evaluation before the restore and are reset, i.e. the contact kinematics are
+        re-evaluated on the next assembly.
         """
 
         for pair, face in zip(self.pairs, checkpoint["faces"]):
             pair.face[:] = face
 
+        self.results.statevars = copy_statevars(checkpoint["statevars"])
+        self.results._statevars = None
+
         self.results.gap = list(checkpoint["gap"])
         self.results.pressure = list(checkpoint["pressure"])
+        self.results.shear = list(checkpoint["shear"])
+        self.results.slip = list(checkpoint["slip"])
         self.results.npoints_in_contact = checkpoint["npoints_in_contact"]
 
         self.results.force = None
         self.results.stiffness = None
 
         self._kinematics = None
+        self._friction = None
         self._values = None
 
     def pressure(self, gap):
@@ -1956,6 +2747,44 @@ class SolidBodyContact:
         dpressure[closed] = -penalty
 
         return pressure, dpressure
+
+    def tangential_penalty(self, pressure, dpressure):
+        r"""Return the tangential penalty stiffness of the friction and its derivative
+        w.r.t. the gap, see Eq. :eq:`friction-penalty`.
+
+        Parameters
+        ----------
+        pressure : ndarray
+            The contact pressure.
+        dpressure : ndarray
+            The derivative of the contact pressure w.r.t. the gap.
+
+        Returns
+        -------
+        stiffness : ndarray
+            The tangential penalty stiffness as tangential traction per unit elastic
+            slip.
+        dstiffness : ndarray
+            The derivative of the tangential penalty stiffness w.r.t. the gap.
+        """
+
+        if self.penalty_tangential is not None:
+            stiffness = np.full_like(pressure, self.penalty_tangential)
+            return stiffness, np.zeros_like(pressure)
+
+        # for an infinite friction coefficient, the tangential penalty stiffness is
+        # evaluated with a friction coefficient of one
+        mu = self.friction if np.isfinite(self.friction) else 1.0
+
+        stiffness = mu * pressure / self.elastic_slip
+        dstiffness = mu * dpressure / self.elastic_slip
+
+        # the tangential penalty stiffness is limited by the normal penalty stiffness
+        limited = stiffness > self.penalty
+        stiffness[limited] = self.penalty
+        dstiffness[limited] = 0.0
+
+        return stiffness, dstiffness
 
     def update_penalty(self):
         r"""Estimate and update the penalty stiffness from the mean stiffness of the
@@ -1998,8 +2827,11 @@ class SolidBodyContact:
         return self.penalty
 
     def _extract(self, field=None, parallel=False):
-        """Evaluate and cache the contact kinematics of all surface pairs. The flag
-        ``parallel`` activates the threaded tree-query of the contact search."""
+        """Evaluate and cache the contact kinematics of all surface pairs, together
+        with the tangential tractions of the friction and the trial state variables.
+        The flag ``parallel`` activates the threaded tree-query of the contact search.
+        The cache is re-evaluated for new displacements and for new (converged) state
+        variables."""
 
         if field is not None:
             self.field = field
@@ -2007,7 +2839,11 @@ class SolidBodyContact:
         values = self.field[0].values
         self.field_primary[0].values = values
 
-        if self._kinematics is not None and np.array_equal(self._values, values):
+        if (
+            self._kinematics is not None
+            and np.array_equal(self._values, values)
+            and self._state is self.results.statevars
+        ):
             return self._kinematics
 
         if self.penalty is None:
@@ -2028,6 +2864,7 @@ class SolidBodyContact:
             for pair in self.pairs
         ]
         self._values = values.copy()
+        self._state = self.results.statevars
 
         self.results.gap = [
             None if kin is None else kin["gap"] for kin in self._kinematics
@@ -2040,7 +2877,60 @@ class SolidBodyContact:
             [0 if kin is None else len(kin["gap"]) for kin in self._kinematics]
         )
 
+        self._friction = [None] * len(self.pairs)
+
+        if self.friction > 0:
+            self._evaluate_friction(x)
+
+        self.results.shear = [
+            None if fr is None else -fr["traction"] for fr in self._friction
+        ]
+        self.results.slip = [
+            None if fr is None else fr["slide"] for fr in self._friction
+        ]
+
         return self._kinematics
+
+    def _evaluate_friction(self, x):
+        """Evaluate the tangential tractions of the friction by a return mapping from
+        the converged state variables and store the trial state variables. These are
+        taken as the state variables after a converged increment."""
+
+        statevars = self.results.statevars
+        faces, coordinates = [], []
+
+        for i, (pair, kin) in enumerate(zip(self.pairs, self._kinematics)):
+            face = np.full(pair.dV.size, -1)
+            xi = np.zeros((pair.dim - 1, pair.dV.size))
+
+            if kin is not None:
+                pressure, dpressure = self.pressure(kin["gap"])
+
+                self._friction[i] = fr = pair.friction(
+                    kinematics=kin,
+                    statevars={
+                        "points": statevars["points"],
+                        "face": statevars["face"][i],
+                        "coordinates": statevars["coordinates"][i],
+                    },
+                    x=x,
+                    pressure=pressure,
+                    dpressure=dpressure,
+                    stiffness=self.tangential_penalty(pressure, dpressure),
+                    friction=self.friction,
+                )
+
+                face[kin["point"]] = fr["face"]
+                xi[:, kin["point"]] = fr["coordinates"]
+
+            faces.append(face)
+            coordinates.append(xi)
+
+        self.results._statevars = {
+            "points": x,
+            "face": faces,
+            "coordinates": coordinates,
+        }
 
     def _vector(self, field=None, parallel=False, resize=None):
         """Assemble the sparse contact force vector. The vectors of the face-pairs of
@@ -2050,9 +2940,14 @@ class SolidBodyContact:
         ndof = self.pairs[0].ndof
 
         values, dofs = [], []
-        for pair, kin in zip(self.pairs, kinematics):
+        for pair, kin, fr in zip(self.pairs, kinematics, self._friction):
             if kin is not None:
-                values.append(pair.vector(kin, -self.pressure(kin["gap"])[0]))
+                vector = pair.vector(kin, -self.pressure(kin["gap"])[0])
+
+                if fr is not None:
+                    vector += pair.vector_friction(kin, fr)
+
+                values.append(vector)
                 dofs.append(pair.dofs(kin))
 
         if values:
@@ -2078,14 +2973,22 @@ class SolidBodyContact:
         ndof = self.pairs[0].ndof
 
         values, dofs = [], []
-        for pair, kin in zip(self.pairs, kinematics):
+        for pair, kin, fr in zip(self.pairs, kinematics, self._friction):
             if kin is not None:
                 pressure, dpressure = self.pressure(kin["gap"])
-                values.append(
-                    pair.matrix(
-                        kin, -pressure, -dpressure, geometric=self.geometric_stiffness
-                    )
+                matrix = pair.matrix(
+                    kin, -pressure, -dpressure, geometric=self.geometric_stiffness
                 )
+
+                if fr is not None:
+                    matrix += pair.matrix_friction(
+                        kin,
+                        fr,
+                        geometric=self.geometric_stiffness,
+                        symmetric=self.symmetric,
+                    )
+
+                values.append(matrix)
                 dofs.append(pair.dofs(kin))
 
         if values:
