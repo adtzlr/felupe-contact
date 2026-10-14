@@ -356,6 +356,16 @@ class ContactSurfacePair:
         identify the connected bodies of the mesh (default is None). If None, the cells
         of both boundary regions are used.
 
+    Attributes
+    ----------
+    face : ndarray of shape (nquadraturepoints * ncells,)
+        The faces of the primary surface, to which the integration points of the
+        secondary surface are assigned by the last evaluation (-1 if not in contact).
+    thickness : ndarray of shape (ncells_primary,)
+        The thickness of the bodies at the faces of the primary surface. Half of the
+        thickness limits the penetration of a face. It is infinite unless it is
+        measured, see :meth:`thickness_primary`.
+
     Notes
     -----
     This class is used internally by :class:`~felupe_contact.SolidBodyContact`.
@@ -501,6 +511,11 @@ class ContactSurfacePair:
         # the face of the primary surface of the previous evaluation, which is used to
         # stabilize the face-assignment of the integration points
         self.face = np.full(self.dV.size, -1)
+
+        # the thickness of the bodies of the primary surface at its faces, which limits
+        # the penetration of the faces. it is not limited unless the thickness is
+        # measured, see thickness_primary()
+        self.thickness = np.full(self.ncells_primary, np.inf)
 
     @staticmethod
     def _init_area(field):
@@ -709,9 +724,10 @@ class ContactSurfacePair:
             The deformed coordinates of the integration points of the secondary surface.
         bounds : dict
             The bounds of the faces of the primary surface, see :meth:`bounds`.
-        max_distance : float
+        max_distance : float or ndarray of shape (ncells_primary,)
             The maximum distance between an integration point and a face of the primary
-            surface which is considered by the contact search.
+            surface which is considered by the contact search, given for all faces or
+            for each face of the primary surface.
         candidates : int
             The number of candidate faces of the primary surface per integration point.
         self_contact : bool
@@ -750,7 +766,8 @@ class ContactSurfacePair:
 
         npoints = points.shape[-1]
         nfaces = self.ncells_primary
-        reach = bounds["radius"] + max_distance
+        distance = np.broadcast_to(max_distance, (nfaces,))
+        reach = bounds["radius"] + distance
 
         if self_contact:
             groups = [
@@ -763,8 +780,8 @@ class ContactSurfacePair:
                 rows = np.flatnonzero(self.body_points != body)
 
                 # the bounding box of the faces of the body, enlarged by the distance
-                lower = bounds["min"][:, cols].min(axis=1) - max_distance
-                upper = bounds["max"][:, cols].max(axis=1) + max_distance
+                lower = (bounds["min"][:, cols] - distance[cols]).min(axis=1)
+                upper = (bounds["max"][:, cols] + distance[cols]).max(axis=1)
 
                 x = points[:, rows].T
                 rows = rows[np.all((x >= lower) & (x <= upper), axis=1)]
@@ -821,9 +838,10 @@ class ContactSurfacePair:
             The bounds of the faces of the primary surface, see :meth:`bounds`.
         normals : ndarray of shape (dim, ncells)
             The outward unit normal vectors of the faces of the secondary surface.
-        max_distance : float
+        max_distance : float or ndarray of shape (ncells_primary,)
             The maximum distance between an integration point and a face of the primary
-            surface which is considered by the contact search.
+            surface which is considered by the contact search, given for all faces or
+            for each face of the primary surface.
         facing : float
             The minimum opposition of the outward unit normal vectors of a face-pair.
 
@@ -914,7 +932,9 @@ class ContactSurfacePair:
             The deformed coordinates of all points of the mesh.
         max_distance : float
             The maximum distance between an integration point and a face of the primary
-            surface which is considered by the contact search.
+            surface which is considered by the contact search. The penetration of a
+            face is also limited by half of the thickness of its body, see
+            :attr:`thickness`.
         candidates : int
             The number of candidate faces of the primary surface per integration point
             of the secondary surface.
@@ -954,7 +974,18 @@ class ContactSurfacePair:
         3.  The narrow phase projects the integration points on the remaining faces,
             see :func:`closest_point_projection`, and checks the validity of the
             projections.
+
+        The penetration of a face is limited by the maximum distance and by half of
+        the thickness of the body of the face, see :attr:`thickness`. An integration
+        point, which penetrates a body by more than half of its thickness, is closer to
+        the opposite side of the body. Hence, a face is never in contact with an
+        integration point on the opposite side of its body, e.g. a face of a body
+        which is located above a thin plate is not projected on the bottom face of the
+        plate, independent of the maximum distance.
         """
+
+        # the maximum penetration of the faces of the primary surface
+        depth = np.minimum(max_distance, self.thickness / 2)
 
         # deformed coordinates of the integration points of the secondary surface
         self.deformed.values = x
@@ -968,11 +999,9 @@ class ContactSurfacePair:
 
         # broad-phase contact search
         point, face = self.candidates(
-            points, bounds, max_distance, candidates, self_contact, workers
+            points, bounds, depth, candidates, self_contact, workers
         )
-        point, face = self.discard(
-            point, face, points, bounds, normals, max_distance, facing
-        )
+        point, face = self.discard(point, face, points, bounds, normals, depth, facing)
 
         cell = point % self.ncells
 
@@ -1038,7 +1067,7 @@ class ContactSurfacePair:
         # surface and if the (signed) distance is within the search distance
         inside = np.all(np.abs(coordinates) <= 1 + released, axis=0)
         valid = (
-            converged & minimum & inside & opposed & (gap < 0) & (gap > -max_distance)
+            converged & minimum & inside & opposed & (gap < 0) & (gap > -depth[face])
         )
 
         if not np.any(valid):
@@ -1094,6 +1123,93 @@ class ContactSurfacePair:
             "h": h,
             "dhdr": dhdr,
         }
+
+    def thickness_primary(self, x, max_distance, tolerance, facing, samples=4):
+        r"""Return the thickness of the bodies of the primary surface at its faces.
+
+        Parameters
+        ----------
+        x : ndarray of shape (npoints, dim)
+            The coordinates of all points of the mesh, e.g. of the undeformed
+            configuration.
+        max_distance : float
+            The maximum thickness which is measured.
+        tolerance : float
+            The tolerance for the natural element coordinates of the projected points.
+        facing : float
+            The minimum opposition of the outward unit normal vectors of a face-pair.
+        samples : int, optional
+            The number of sampling points per characteristic size of the faces along
+            the inward normal vector of a face (default is 4).
+
+        Returns
+        -------
+        ndarray of shape (ncells_primary,)
+            The thickness of the bodies at the faces of the primary surface. The
+            thickness is infinite if no opposite face is found within the maximum
+            distance.
+
+        Notes
+        -----
+        The thickness of a body at a face is the distance between the center of the
+        face and its projection on the opposite face of the same body. The opposite
+        faces are the nearest faces (by their centers) of sampling points along the
+        inward unit normal vector, which starts at the center of a face. A projection
+        is valid if it is located inside the opposite face and if the outward unit
+        normal vectors of both faces are opposed, see ``facing``. Faces of other bodies
+        are not considered, i.e. an initial penetration of two bodies, e.g. of an
+        interference fit, doesn't affect the thickness.
+        """
+
+        vertices = self.vertices(x, self.cells_faces_primary)
+        bounds = self.bounds(vertices, extent=1 + 2 * tolerance)
+        center, normal = bounds["center"], bounds["normal"]
+
+        nfaces = self.ncells_primary
+        thickness = np.full(nfaces, np.inf)
+
+        # sampling points along the inward unit normal vectors of the faces
+        size = np.median(2 * bounds["radius"]) / np.sqrt(self.dim - 1)
+        distance = np.arange(1, int(np.ceil(samples * max_distance / size)) + 1)
+        distance = distance * size / samples
+        points = center[:, :, None] - normal[:, :, None] * distance
+
+        # the nearest faces of the sampling points are the candidates of the opposite
+        # faces, which must belong to the same body and must be opposed
+        tree = cKDTree(center.T)
+        nearest = tree.query(points.reshape(self.dim, -1).T, k=min(2, nfaces))[1]
+        nearest = nearest.reshape(nfaces, -1)
+
+        face = np.repeat(np.arange(nfaces), nearest.shape[1])
+        other = nearest.ravel()
+
+        opposed = np.einsum("ip,ip->p", normal[:, face], normal[:, other]) < -facing
+        keep = opposed & (self.body_primary[face] == self.body_primary[other])
+
+        face, other = np.unique(np.stack([face[keep], other[keep]]), axis=1)
+
+        if len(face) == 0:
+            return thickness
+
+        # the projections of the centers of the faces on the opposite faces
+        vertices_other = np.ascontiguousarray(vertices[..., other])
+        coordinates, converged = closest_point_projection(
+            center[:, face], vertices_other, self.element_primary
+        )
+        h, dhdr, _ = self.element_primary.evaluate(coordinates)
+        projected = np.einsum("ap,aip->ip", h, vertices_other)
+        normal_other = unit_normals(
+            np.einsum("aJp,aip->Jip", dhdr, vertices_other),
+            self.orientation_primary[other],
+        )
+        gap = np.einsum("ip,ip->p", center[:, face] - projected, normal_other)
+
+        inside = np.all(np.abs(coordinates) <= 1 + tolerance, axis=0)
+        valid = converged & inside & (gap < 0) & (gap > -max_distance)
+
+        np.minimum.at(thickness, face[valid], -gap[valid])
+
+        return thickness
 
     def variations_gap(self, kinematics):
         r"""Return the variation of the gap w.r.t. the displacements of the points of a
@@ -2029,11 +2145,10 @@ class SolidBodyContact:
         a face of the primary surface which is considered by the contact search
         (default is None). If None, five times the characteristic size of the faces of
         the contact surfaces is used. This limits the maximum detectable penetration.
-        It must be smaller than the distance between two opposed faces which are not
-        able to touch, e.g. the distance between the top and the bottom face of a body,
-        because such a face-pair is detected as a deeply penetrated one otherwise.
-        Decrease it for a coarse mesh of a small body, where the default is larger than
-        the body itself.
+        The penetration of a face is also limited by half of the thickness of its body
+        in the undeformed configuration, see Eq. :eq:`contact-thickness`, i.e. the
+        opposite faces of a (thin) body are never in contact with each other,
+        independent of the maximum distance.
     candidates : int, optional
         The number of candidate faces of the primary surface which are evaluated per
         integration point of the secondary surface (default is 8).
@@ -2050,10 +2165,9 @@ class SolidBodyContact:
     self_contact : bool, optional
         Flag to consider face-pairs which belong to the same body of the mesh (default
         is False). The bodies of a mesh are identified by their point-connectivity: two
-        faces belong to the same body if they are connected by a path of cells. For
-        self-contact, ``max_distance`` must be smaller than the thickness of a body. A
-        warning is raised if integration points are in contact with their own body in
-        the undeformed configuration.
+        faces belong to the same body if they are connected by a path of cells. The
+        opposite faces of a body are not in self-contact, because the penetration is
+        limited by half of the thickness of the body.
     geometric_stiffness : bool, optional
         Flag to add the geometric part of the contact stiffness matrix (default is
         True). This is required for a quadratic rate of convergence.
@@ -2220,6 +2334,21 @@ class SolidBodyContact:
     on the opposite side of the body or around a corner, as a valid contact partner.
     The bodies are identified by the cells of the given solid bodies or, for field
     containers on boundary regions, by the cells of the boundary regions.
+
+    The penetration of a face of the primary surface is limited by the maximum
+    distance :math:`g_{max}` and by half of the thickness :math:`t` of its body, see Eq.
+    :eq:`contact-thickness`. The thickness at a face is measured once in the undeformed
+    configuration by a projection of the integration points of the face on the
+    opposite faces of its own body. An integration point, which penetrates a body by
+    more than half of its thickness, is closer to the opposite side of the body. Hence,
+    an integration point is never projected through a body on its opposite face, e.g.
+    the side face of a sheared rubber block, which is located above a thin metal plate,
+    is not in contact with the bottom face of the plate.
+
+    ..  math::
+        :label: contact-thickness
+
+        -g < \min{\left( g_{max},\ \frac{t}{2} \right)}
 
     The contact search is designed for contact surfaces with all faces on the outline
     of the meshes. It is carried out in three phases, see
@@ -2557,8 +2686,16 @@ class SolidBodyContact:
         if elastic_slip is None and penalty_tangential is None:
             self.elastic_slip = 1e-2 * self.size
 
-        if self_contact:
-            self._check_self_contact()
+        # the thickness of the bodies of the primary surfaces in the undeformed
+        # configuration, which limits the penetration of their faces. only the
+        # thickness up to twice the maximum distance is relevant
+        for pair in self.pairs:
+            pair.thickness = pair.thickness_primary(
+                x=pair.field.region.mesh.points,
+                max_distance=2 * self.max_distance,
+                tolerance=self.tolerance,
+                facing=self.facing,
+            )
 
         self.assemble = Assemble(vector=self._vector, matrix=self._matrix)
         self.results = Results()
@@ -2599,32 +2736,6 @@ class SolidBodyContact:
             lines.append(f"  Integration points sliding: {nslip}")
 
         return "\n".join(lines)
-
-    def _check_self_contact(self):
-        """Warn if integration points are in contact with their own body in the
-        undeformed configuration, i.e. if the maximum distance of the contact search
-        exceeds the thickness of a body."""
-
-        pair = self.pairs[0]
-        kinematics = pair.kinematics(
-            x=pair.field.region.mesh.points,
-            max_distance=self.max_distance,
-            candidates=self.candidates,
-            tolerance=self.tolerance,
-            facing=self.facing,
-            self_contact=True,
-        )
-        pair.face[:] = -1
-
-        if kinematics is not None:
-            depth = -kinematics["gap"].min()
-            warnings.warn(
-                f"{len(kinematics['gap'])} integration points are in self-contact in "
-                f"the undeformed configuration (maximum penetration {depth:.3g}). The "
-                f"maximum distance of the contact search ({self.max_distance:.3g}) "
-                "probably exceeds the thickness of a body, i.e. the opposite faces of a "
-                "body are detected as penetrated ones. Decrease `max_distance`."
-            )
 
     def checkpoint(self):
         """Return a checkpoint of the state of the contact search.

@@ -478,19 +478,24 @@ def test_single_body_with_self_contact():
     assert contact.results.npoints_in_contact == 0
 
 
-def test_self_contact_warns_if_max_distance_exceeds_the_thickness():
-    """The opposite faces of a body are detected as penetrated ones if the maximum
-    distance exceeds the thickness of the body (here, the default of five face sizes
-    exceeds the edge length of the block)."""
+def test_self_contact_with_the_default_max_distance():
+    """The opposite faces of a body are not in self-contact, although the default
+    maximum distance (five face sizes) exceeds the edge length of the block: the
+    penetration is limited by half of the thickness of the body."""
 
     mesh = fem.Cube(a=(0, 0, 0), b=(1, 1, 1), n=(3, 3, 3))
     field, solid = solid_body(mesh)
 
-    with pytest.warns(UserWarning, match="self-contact in the undeformed"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         contact = SolidBodyContact(solid, self_contact=True)
 
-    # the check doesn't change the state of the contact search
-    assert np.all(contact.pairs[0].face == -1)
+    assert contact.max_distance > 1.0
+    assert np.allclose(contact.pairs[0].thickness, 1.0)
+
+    # a block at rest does not penetrate itself
+    assert contact.assemble.vector().nnz == 0
+    assert contact.results.npoints_in_contact == 0
 
 
 def test_estimated_penalty_with_a_multiplier():

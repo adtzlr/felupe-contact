@@ -73,9 +73,6 @@ All notable changes to this project will be documented in this file. The format 
   closest-point projection, see the changes of the contact search below.
 - Added the property `ContactSurfacePair.nneighbours`, the maximum number of faces of
   the primary surface which share a point with a face of the secondary surface.
-- Added a warning for self-contact, if integration points are in contact with their own
-  body in the undeformed configuration, i.e. if `max_distance` exceeds the thickness of
-  a body.
 - Added `ContactSurfacePair.dofs()`, `ContactSurfacePair.vector()` and
   `ContactSurfacePair.matrix()`, which return the degrees of freedom and the force
   vectors and stiffness matrices of the face-pairs, and the helpers `sparse_vector()`,
@@ -152,6 +149,20 @@ All notable changes to this project will be documented in this file. The format 
   which is moved over a stiff base.
 
 ### Fixed
+- Fixed spurious contacts through thin bodies. An integration point above a thin body,
+  e.g. on the side face of a sheared (or bulging) rubber block above a thin metal plate,
+  was projected on the opposite (bottom) face of the body and detected as a deep
+  penetration, if the outward unit normal vectors of both faces were (slightly) opposed
+  and if the distance was smaller than the maximum distance of the contact search (by
+  default five times the size of the faces). This made the Newton-Raphson method
+  diverge, e.g. for a rubber block on a thin metal plate with all faces on the outline of
+  both bodies as contact surfaces. Now, the penetration of a face is limited by half of
+  the thickness of its body, which is measured once in the undeformed configuration by
+  `ContactSurfacePair.thickness_primary()` and stored in `ContactSurfacePair.thickness`.
+  An integration point which penetrates a body by more than half of its thickness is
+  closer to the opposite side of the body, while the penetrations of a valid penalty
+  contact are small. The maximum distance no longer has to be smaller than the
+  thickness of the bodies.
 - Fixed the connected bodies of a body with an enclosed cavity. The bodies were
   identified by the cells of the boundary regions, which are disconnected for a wall
   of more than two cells, i.e. the inner surface was detected as another body which
@@ -243,6 +254,9 @@ All notable changes to this project will be documented in this file. The format 
 - Changed `ContactSurfacePair.kinematics()` to return also the deformed coordinates of
   the integration points in contact and the natural element coordinates of their
   projections, which are required by the friction.
+- Changed `ContactSurfacePair.candidates()` and `ContactSurfacePair.discard()` to accept
+  the maximum distance for each face of the primary surface, i.e. the maximum distance,
+  limited by half of the thickness of the body of a face.
   The second derivatives of the surface coordinates are now evaluated by the hessian of
   the shape functions of the faces instead of the constant mixed second derivative of a
   bilinear quad, i.e. curved faces are supported.

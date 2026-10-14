@@ -228,6 +228,115 @@ def test_number_of_neighbours():
     assert pair.nneighbours == max(shared)
 
 
+def test_thickness_of_the_primary_bodies():
+    """The thickness of the bodies is measured at the faces of the primary surface by
+    a projection on the opposite faces of the own body."""
+
+    mesh = two_blocks()
+    field = fem.FieldContainer([fem.Field(fem.RegionHexahedron(mesh), dim=3)])
+    solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
+    contact = SolidBodyContact(solid)
+
+    pair = contact.pairs[0]
+    z = mesh.points[pair.cells_faces_primary].mean(axis=1)[:, 2]
+
+    # the lower block is a unit cube, the upper block has a height of 0.6 and a width
+    # of 0.7
+    lower = z <= 1.0
+    horizontal = np.isclose(z, 1.02) | np.isclose(z, 1.62)
+
+    assert np.allclose(pair.thickness[lower], 1.0)
+    assert np.allclose(pair.thickness[horizontal], 0.6)
+    assert np.allclose(pair.thickness[~lower & ~horizontal], 0.7)
+
+
+def test_thickness_is_infinite_without_opposite_faces():
+    "The thickness is not limited if the primary surface has no opposite faces."
+
+    mesh = two_blocks()
+    field = fem.FieldContainer([fem.Field(fem.RegionHexahedron(mesh), dim=3)])
+    solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
+    contact = SolidBodyContact(
+        solid,
+        mask=np.logical_and(mesh.z > 1.0, mesh.z < 1.1),
+        mask_primary=np.isclose(mesh.z, 1.0),
+    )
+
+    assert np.all(np.isinf(contact.pairs[0].thickness))
+
+
+def test_thin_plate_is_not_penetrated_from_its_opposite_side():
+    """A face above a thin plate is not in contact with the bottom face of the plate,
+    although their normal vectors are opposed and the distance is smaller than the
+    maximum distance. The penetration is limited by half of the thickness."""
+
+    plate = fem.Cube(a=(0, 0, 0), b=(1, 1, 0.2), n=(5, 5, 2))
+    block = fem.Cube(a=(0.3, 0.3, 0.3), b=(0.7, 0.7, 0.6), n=(3, 3, 2))
+    mesh = fem.MeshContainer([plate, block], merge=True).stack()
+    field = fem.FieldContainer([fem.Field(fem.RegionHexahedron(mesh), dim=3)])
+    solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
+
+    # the top face of the block faces the bottom face of the plate at a distance of 0.6
+    # (an exhaustive search of the candidates)
+    contact = SolidBodyContact(solid, max_distance=1.0, candidates=200)
+    pair = contact.pairs[0]
+
+    assert kinematics(contact, mesh.points) is None
+    assert np.isclose(pair.thickness.min(), 0.2)
+
+    # without the limit of the thickness, a deep penetration would be detected
+    pair.thickness[:] = np.inf
+    result = kinematics(contact, mesh.points)
+
+    assert result is not None
+    assert np.allclose(result["gap"].min(), -0.6)
+
+
+@pytest.mark.parametrize("friction", [0.0, 0.3])
+def test_rubber_block_on_a_thin_plate(friction):
+    """A rubber block is pressed on a thin and stiff plate and moved sideways. The
+    contact surfaces are all faces of both bodies and the default maximum distance
+    exceeds the thickness of the plate. The bulging side faces of the block are never
+    in contact with the bottom face of the plate."""
+
+    plate = fem.Rectangle(a=(-15, -4), b=(30, 0), n=(19, 3))
+    block = fem.Rectangle(a=(-10, 0.1), b=(10, 10.1), n=(9, 5))
+    container = fem.MeshContainer([plate, block], merge=True)
+
+    regions = [fem.RegionQuad(m) for m in container]
+    fields = [fem.FieldContainer([fem.FieldPlaneStrain(r, dim=2)]) for r in regions]
+    field = fem.field.merge(fields)
+
+    steel = fem.SolidBody(fem.NeoHooke(mu=80769.0, bulk=175000.0), fields[0])
+    rubber = fem.SolidBodyNearlyIncompressible(fem.NeoHooke(mu=1.0), fields[1], 5000)
+    contact = SolidBodyContact(rubber, steel, friction=friction)
+
+    assert contact.max_distance > 4.0
+    assert np.isclose(contact.pairs[0].thickness.min(), 4.0)
+
+    y = field.region.mesh.points[:, 1]
+    top = np.isclose(y, y.max())
+    boundaries = {
+        "fixed": fem.Boundary(field[0], mask=np.isclose(y, y.min())),
+        "x": fem.Boundary(field[0], mask=top, skip=(0, 1)),
+        "y": fem.Boundary(field[0], mask=top, skip=(1, 0)),
+    }
+    press = fem.Step(
+        items=[steel, rubber, contact],
+        ramp={boundaries["y"]: fem.math.linsteps([0, -1.5], num=3)},
+        boundaries=boundaries,
+    )
+    move = fem.Step(
+        items=[steel, rubber, contact],
+        ramp={boundaries["x"]: fem.math.linsteps([0, 2.0], num=2)},
+        boundaries=boundaries,
+    )
+    fem.Job(steps=[press, move]).evaluate(verbose=0)
+
+    assert contact.results.npoints_in_contact > 0
+    assert np.all(contact.results.gap[0] > -0.05)
+
+
 def test_previous_face_is_a_candidate():
     """The face of the previous evaluation is a candidate, even if it is not among the
     nearest faces of the tree-query."""

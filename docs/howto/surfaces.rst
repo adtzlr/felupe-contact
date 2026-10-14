@@ -87,7 +87,7 @@ Both faces of a contact zone are used as secondary surfaces. Hence, twice the nu
 
 ..  hint::
 
-    The argument ``max_distance`` limits the maximum detectable penetration. It must be smaller than the distance between two opposed faces which are not able to touch, e.g. the top and the bottom face of a thin body, because such a face-pair is detected as a deeply penetrated one otherwise. The default value is five times the characteristic size of the faces. Decrease it for a coarse mesh of a small (thin) body.
+    The argument ``max_distance`` limits the maximum detectable penetration. The default value is five times the characteristic size of the faces. The penetration of a face is also limited by half of the thickness of its body, which is measured in the undeformed configuration. Hence, the opposite faces of a thin body, e.g. the bottom face of a thin metal plate and the side face of a rubber block above the plate, are never in contact with each other, independent of the maximum distance.
 
 Faces in the region of interest
 -------------------------------
