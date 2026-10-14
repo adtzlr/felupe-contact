@@ -276,6 +276,22 @@ def test_previous_face_is_a_candidate():
     assert np.allclose(result["gap"], -0.05)
 
 
+def test_kinematics_are_contiguous():
+    """The arrays of the contact kinematics are C-contiguous, which speeds up the
+    assembly of the stiffness matrix."""
+
+    mesh = two_blocks()
+    surface = fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(mesh), dim=3)])
+    contact = SolidBodyContact(surface, surface, penalty=1.0, max_distance=0.4)
+
+    x = mesh.points.copy()
+    x[mesh.z > 1.01, 2] -= 0.05
+    result = kinematics(contact, x)
+
+    assert len(result["point"]) > 0
+    assert all(value.flags["C_CONTIGUOUS"] for value in result.values())
+
+
 def test_closest_point_projection_active_set():
     """The pairs of a batch, which converge at different rates, are projected like
     single pairs."""
