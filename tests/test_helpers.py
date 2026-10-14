@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from itertools import product
+
 import felupe as fem
 import numpy as np
 import pytest
@@ -365,3 +367,56 @@ def test_closest_point_projection_curved_edge():
 
     assert np.all(converged)
     assert np.allclose(coordinates, 0.0, atol=1e-6)
+
+
+@pytest.mark.parametrize("cell_type", list(FACE_ELEMENTS.keys()))
+def test_batched_element_evaluate(cell_type):
+    "The shape functions and their derivatives are evaluated at once."
+
+    element = BatchedElement(FACE_ELEMENTS[cell_type]())
+
+    rng = np.random.default_rng(seed=3)
+    coordinates = rng.uniform(-1.2, 1.2, size=(element.dim, 4, 3))
+
+    h, dhdr, d2hdrdr = element.evaluate(coordinates)
+    reference = np.einsum(
+        "am,m...->a...", element.coefficients, element.monomials(coordinates)
+    )
+
+    assert np.allclose(h, reference)
+    assert np.allclose(h, element.function(coordinates))
+    assert dhdr.shape == (element.npoints, element.dim, 4, 3)
+    assert d2hdrdr.shape == (element.npoints, element.dim, element.dim, 4, 3)
+
+
+@pytest.mark.parametrize("cell_type", list(FACE_ELEMENTS.keys()))
+@pytest.mark.parametrize("extent", [1.0, 1.2])
+def test_control_net(cell_type, extent):
+    """The control points of a Bézier patch represent a face on the extended range and
+    their convex hull contains the face."""
+
+    element = BatchedElement(FACE_ELEMENTS[cell_type]())
+    matrix = element.control_net(extent)
+
+    # the matrix is cached
+    assert element.control_net(extent) is matrix
+
+    # the control points of a constant function are constant (partition of unity)
+    assert np.allclose(matrix.sum(axis=1), 1.0)
+
+    rng = np.random.default_rng(seed=6)
+    values = rng.uniform(-1, 1, size=element.npoints)
+    control = matrix @ values
+
+    axes = [np.linspace(-extent, extent, 11)] * element.dim
+    grid = np.array([a.ravel() for a in np.meshgrid(*axes, indexing="ij")])
+    function = values @ element.function(grid)
+
+    assert np.all(function >= control.min() - 1e-12)
+    assert np.all(function <= control.max() + 1e-12)
+
+    # the corners of the patch are interpolated by the control points
+    corners = np.array(list(product([-extent, extent], repeat=element.dim))).T
+    at_corners = values @ element.function(corners)
+
+    assert np.all(np.isclose(at_corners[:, None], control[None, :]).any(axis=1))

@@ -271,3 +271,34 @@ def test_contact_force_of_a_uniform_penetration(field_type):
     area = np.pi * width**2 if axis == 0 else width
 
     assert np.isclose(total, penalty * penetration * area)
+
+
+@pytest.mark.parametrize("cell_region, region, face_type, convert, field_type", cases())
+def test_solid_body_creates_the_boundary_region(
+    cell_region, region, face_type, convert, field_type
+):
+    """A contact of a solid body creates the boundary region of its region with a field
+    of the same type and the same results as the boundary region of FElupe."""
+
+    dim = 3 if "Hexahedron" in region.__name__ else 2
+    mesh = two_blocks(dim, convert)
+    kwargs = dict(penalty=100.0, max_distance=0.4)
+    contact, field = penetrating(mesh, field_type, cell_region, region, **kwargs)
+
+    solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
+    contact_solid = SolidBodyContact(solid, **kwargs)
+
+    assert type(contact_solid.field.region) is region
+    assert type(contact_solid.field[0]) is field_type
+    assert contact_solid.field_primary is contact_solid.field
+
+    # the values of the contact surface are linked to the values of the solid body
+    assert contact_solid.field[0].values is field[0].values
+
+    force = contact.assemble.vector(field=field).toarray()
+    stiffness = contact.assemble.matrix(field=field).toarray()
+
+    assert contact_solid.results.npoints_in_contact == 0
+    assert np.allclose(contact_solid.assemble.vector().toarray(), force)
+    assert np.allclose(contact_solid.assemble.matrix().toarray(), stiffness)
+    assert contact_solid.results.npoints_in_contact > 0

@@ -15,6 +15,8 @@ felupe-contact is an extension package for [FElupe](https://github.com/adtzlr/fe
 - ✅ three-dimensional, plane strain and axisymmetric problems
 - ✅ all boundary regions of FElupe, i.e. faces with linear or quadratic shape functions
 - ✅ an item of FElupe, i.e. it is used in a `Step` and in a `Job` like a `SolidBody`
+- ✅ created directly on solid bodies with all faces on the outline of their meshes, i.e. no boundary regions are required
+- ✅ an efficient and robust contact search for contact surfaces with all faces, e.g. of many bodies
 
 ## 📦 Installation
 Install Python, open a terminal and run
@@ -30,7 +32,6 @@ This minimal code-block demonstrates a rubber block, which is pressed on a (stif
 
 ```python
 import felupe as fem
-import numpy as np
 
 from felupe_contact import SolidBodyContact
 
@@ -42,15 +43,8 @@ region = fem.RegionHexahedron(mesh)
 field = fem.FieldContainer([fem.Field(region, dim=3)])
 solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
 
-# the contact surfaces are boundary regions on the same mesh
-mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
-secondary = fem.FieldContainer(
-    [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
-)
-primary = fem.FieldContainer(
-    [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=np.isclose(mesh.z, 1.0)), dim=3)]
-)
-contact = SolidBodyContact(secondary, primary, items=[solid])
+# the contact surfaces are created on the outline of the mesh of the solid body
+contact = SolidBodyContact(solid)
 
 boundaries = {
     "fixed": fem.Boundary(field[0], fz=0.0),

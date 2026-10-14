@@ -18,12 +18,12 @@ This guide adds a contact to a FElupe-script, step by step. A rubber block is pr
     *   - :class:`~felupe.RegionHexahedron`, :class:`~felupe.Field`, :class:`~felupe.SolidBody`
         - FElupe
         - unchanged
-    *   - :class:`~felupe.RegionHexahedronBoundary`, :class:`~felupe.Field`
-        - FElupe
-        - the contact surfaces, created on the mesh of the solid bodies
     *   - :class:`~felupe_contact.SolidBodyContact`
         - felupe-contact
-        - an item, created from the contact surfaces
+        - an item, created on the solid body
+    *   - :class:`~felupe.RegionHexahedronBoundary`, :class:`~felupe.Field`
+        - FElupe
+        - the contact surfaces, created by the contact for the region of the solid body
     *   - :class:`~felupe.Boundary`, :class:`~felupe.Step`, :class:`~felupe.Job`
         - FElupe
         - the contact is added to the items of a step
@@ -57,34 +57,28 @@ The region, the displacement field and the solid body are created as usual. Both
     >>> field = fem.FieldContainer([fem.Field(region, dim=3)])
     >>> solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
 
-Contact surfaces
-----------------
-A contact surface is a field container with a displacement field, which is created on a boundary region of the mesh of the solid body, e.g. a :class:`~felupe.RegionHexahedronBoundary`. The integration points of the *secondary* surface are projected on the faces of the *primary* surface. Here, only the faces in the region of interest are used: the bottom faces of the upper block are the secondary surface and the top faces of the lower block are the primary surface.
+Contact
+-------
+The contact is created on the solid body. Its contact surfaces are field containers with a displacement field on the boundary region of the region of the solid body, here a :class:`~felupe.RegionHexahedronBoundary`, which are created by the contact. The integration points of the *secondary* surface are projected on the faces of the *primary* surface. Here, only the faces in the region of interest are used, selected by masks of the points of the mesh: the bottom faces of the upper block are the secondary surface and the top faces of the lower block are the primary surface.
 
 ..  pyvista-plot::
     :context:
 
-    >>> mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
-    >>> secondary = fem.FieldContainer(
-    ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
-    ... )
-    >>> primary = fem.FieldContainer(
-    ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=np.isclose(mesh.z, 1.0)), dim=3)]
+    >>> contact = SolidBodyContact(
+    ...     solid,
+    ...     mask=np.logical_and(mesh.z > 1.0, mesh.z < 1.1),
+    ...     mask_primary=np.isclose(mesh.z, 1.0),
     ... )
 
 .. hint::
 
-   The masks are optional. The contact surfaces may also be given by all faces on the outline of the mesh, see :ref:`how-to-surfaces`.
+   The masks are optional. Without masks, all faces on the outline of the mesh are contact surfaces, i.e. ``SolidBodyContact(solid)``, see :ref:`how-to-surfaces`.
 
-Contact
--------
-The contact is created from both contact surfaces. Its penalty stiffness is estimated from the stiffness matrices of the given items on the first assembly. The contact is an item of FElupe, see :class:`felupe.mechanics.Item`.
+The penalty stiffness of the contact is estimated from the stiffness matrix of the solid body on the first assembly. The contact is an item of FElupe, see :class:`felupe.mechanics.Item`.
 
 ..  pyvista-plot::
     :context:
 
-    >>> contact = SolidBodyContact(secondary, primary, items=[solid])
-    >>>
     >>> isinstance(contact, fem.mechanics.Item)
     True
 
@@ -132,7 +126,7 @@ The results of the solid body, e.g. the principal values of the Cauchy stress, a
 Next steps
 ----------
 
-* :ref:`how-to-surfaces` explains how the contact surfaces are defined, e.g. without masks.
+* :ref:`how-to-surfaces` explains how the contact surfaces are defined, e.g. without masks or by field containers on boundary regions.
 * :ref:`how-to-2d` shows a contact for plane strain and axisymmetric problems.
 * :ref:`how-to-convergence` shows how the penalty stiffness and the plugins of FElupe improve the convergence.
 * The :ref:`examples` contain complete scripts.

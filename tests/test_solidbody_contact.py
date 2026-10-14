@@ -8,6 +8,7 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from felupe_contact import SolidBodyContact
+from felupe_contact._solidbody_contact import ContactSurfacePair
 
 
 def two_blocks():
@@ -274,7 +275,9 @@ def test_normals_point_outwards():
 
     mesh = fem.Cube(a=(0, 0, 0), b=(1, 1, 1), n=(3, 3, 3))
     secondary = surface(mesh)
-    contact = SolidBodyContact(secondary, surface(mesh), penalty=1.0, self_contact=True)
+    contact = SolidBodyContact(
+        secondary, surface(mesh), penalty=1.0, self_contact=True, max_distance=0.5
+    )
 
     pair = contact.pairs[0]
 
@@ -330,14 +333,14 @@ def test_requires_items_or_penalty():
         SolidBodyContact(surface(mesh), surface(mesh))
 
 
-def test_requires_a_boundary_region():
-    "A field on a boundary region is required for both contact surfaces."
+def test_pair_requires_a_boundary_region():
+    "A surface pair requires a field on a boundary region for both contact surfaces."
 
     mesh = two_blocks()
     volume = fem.FieldContainer([fem.Field(fem.RegionHexahedron(mesh), dim=3)])
 
     with pytest.raises(TypeError):
-        SolidBodyContact(volume, surface(mesh), penalty=1.0)
+        ContactSurfacePair(volume, surface(mesh))
 
 
 def test_requires_a_plane_strain_or_axisymmetric_field():
@@ -419,7 +422,13 @@ def test_self_contact_does_not_warn():
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        SolidBodyContact(surface(mesh), surface(mesh), penalty=1.0, self_contact=True)
+        SolidBodyContact(
+            surface(mesh),
+            surface(mesh),
+            penalty=1.0,
+            self_contact=True,
+            max_distance=0.5,
+        )
 
 
 def test_bodies_of_the_two_blocks():
@@ -452,13 +461,36 @@ def test_single_body_with_self_contact():
 
     mesh = fem.Cube(a=(0, 0, 0), b=(1, 1, 1), n=(3, 3, 3))
     field, solid = solid_body(mesh)
-    contact = SolidBodyContact(
-        surface(mesh), surface(mesh), items=[solid], self_contact=True
-    )
+
+    # the maximum distance must be smaller than the thickness of the body
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        contact = SolidBodyContact(
+            surface(mesh),
+            surface(mesh),
+            items=[solid],
+            self_contact=True,
+            max_distance=0.5,
+        )
 
     # a block at rest does not penetrate itself
     assert contact.assemble.vector().nnz == 0
     assert contact.results.npoints_in_contact == 0
+
+
+def test_self_contact_warns_if_max_distance_exceeds_the_thickness():
+    """The opposite faces of a body are detected as penetrated ones if the maximum
+    distance exceeds the thickness of the body (here, the default of five face sizes
+    exceeds the edge length of the block)."""
+
+    mesh = fem.Cube(a=(0, 0, 0), b=(1, 1, 1), n=(3, 3, 3))
+    field, solid = solid_body(mesh)
+
+    with pytest.warns(UserWarning, match="self-contact in the undeformed"):
+        contact = SolidBodyContact(solid, self_contact=True)
+
+    # the check doesn't change the state of the contact search
+    assert np.all(contact.pairs[0].face == -1)
 
 
 def test_estimated_penalty_with_a_multiplier():

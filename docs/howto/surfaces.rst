@@ -3,7 +3,7 @@
 Define the Contact Surfaces
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A contact surface is a field container with a displacement field, which is created on a boundary region of FElupe, e.g. a :class:`~felupe.RegionHexahedronBoundary` or a :class:`~felupe.RegionQuadBoundary`. A :class:`~felupe_contact.SolidBodyContact` takes two contact surfaces: the integration points of the *secondary* surface are projected on the faces of the *primary* surface.
+A contact surface is a field container with a displacement field, which is created on a boundary region of FElupe, e.g. a :class:`~felupe.RegionHexahedronBoundary` or a :class:`~felupe.RegionQuadBoundary`. A :class:`~felupe_contact.SolidBodyContact` takes two contact surfaces: the integration points of the *secondary* surface are projected on the faces of the *primary* surface. The contact surfaces are created on solid bodies by the contact, or they are given as field containers on boundary regions.
 
 One mesh for all bodies
 -----------------------
@@ -27,38 +27,37 @@ The contact couples the degrees of freedom of the bodies which are in contact. H
 
 The bodies of a mesh are identified by the connectivity of its cells: two faces belong to the same body if they are connected by a path of cells. Faces of the same body are never in contact, unless ``self_contact=True`` is given.
 
-Faces in the region of interest
--------------------------------
-The faces of a boundary region are selected by a mask of the points of the mesh. Here, the bottom faces of the upper block are the secondary surface and the top faces of the lower block are the primary surface.
-
-..  pyvista-plot::
-    :context:
-
-    >>> mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
-    >>> secondary = fem.FieldContainer(
-    ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
-    ... )
-    >>> primary = fem.FieldContainer(
-    ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=np.isclose(mesh.z, 1.0)), dim=3)]
-    ... )
-    >>> contact = SolidBodyContact(secondary, primary, items=[solid])
-
-The choice of the secondary surface matters: the contact tractions are evaluated at the integration points of the secondary surface. Use the softer and finer meshed surface as the secondary surface, e.g. the rubber surface of a rubber-to-metal contact. Alternatively, a two-pass contact evaluates the contact twice with exchanged roles of the surfaces, each with half of the contact potential. This removes the bias of the choice of the secondary surface at the expense of a doubled evaluation time.
-
-..  pyvista-plot::
-    :context:
-
-    >>> contact = SolidBodyContact(secondary, primary, items=[solid], two_pass=True)
-
 All faces on the outline
 ------------------------
-The contact surfaces don't have to be restricted to the region of interest. A boundary region without a mask contains all faces on the outline of the mesh, i.e. the faces of the contact zone don't have to be known in advance. The same field container is used for both contact surfaces.
+The contact is created on the solid body. The boundary region of the region of the solid body is created with all faces on the outline of the mesh, i.e. the faces of the contact zone don't have to be known in advance. This contact surface is used as secondary and as primary surface. The penalty stiffness is estimated from the stiffness matrix of the solid body.
 
 ..  pyvista-plot::
     :context:
 
-    >>> surface = fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(mesh), dim=3)])
-    >>> contact = SolidBodyContact(surface, surface, items=[solid])
+    >>> contact = SolidBodyContact(solid)
+    >>> type(contact.field.region).__name__
+    'RegionHexahedronBoundary'
+
+The boundary region is looked up for the type of the region of the displacement field of the solid body. The displacement field of the contact surface is of the same type as the displacement field of the solid body and its values are linked to the solid body.
+
+..  list-table:: The regions and boundary regions of FElupe
+    :header-rows: 1
+    :widths: 50 50
+
+    *   - Region
+        - Boundary region
+    *   - :class:`~felupe.RegionQuad`
+        - :class:`~felupe.RegionQuadBoundary`
+    *   - :class:`~felupe.RegionQuadraticQuad`
+        - :class:`~felupe.RegionQuadraticQuadBoundary`
+    *   - :class:`~felupe.RegionBiQuadraticQuad`
+        - :class:`~felupe.RegionBiQuadraticQuadBoundary`
+    *   - :class:`~felupe.RegionHexahedron`
+        - :class:`~felupe.RegionHexahedronBoundary`
+    *   - :class:`~felupe.RegionQuadraticHexahedron`
+        - :class:`~felupe.RegionQuadraticHexahedronBoundary`
+    *   - :class:`~felupe.RegionTriQuadraticHexahedron`
+        - :class:`~felupe.RegionTriQuadraticHexahedronBoundary`
 
 The contact search discards all face-pairs which are not able to touch each other:
 
@@ -66,7 +65,7 @@ The contact search discards all face-pairs which are not able to touch each othe
 * faces which belong to the same body (unless ``self_contact=True``) and
 * faces whose outward unit normal vectors are not opposed, e.g. faces which are located around a corner (see the argument ``facing``).
 
-Both faces of a contact zone are used as secondary surfaces. Hence, twice the number of integration points are in contact, compared to the masked surfaces from above. This acts like a two-pass contact without its scale factors, i.e. ``two_pass=True`` is redundant in this case.
+Both faces of a contact zone are used as secondary surfaces. Hence, twice the number of integration points are in contact, compared to the masked surfaces from below. This acts like a two-pass contact without its scale factors, i.e. ``two_pass=True`` is redundant in this case.
 
 ..  pyvista-plot::
     :context:
@@ -90,9 +89,54 @@ Both faces of a contact zone are used as secondary surfaces. Hence, twice the nu
 
     The argument ``max_distance`` limits the maximum detectable penetration. It must be smaller than the distance between two opposed faces which are not able to touch, e.g. the top and the bottom face of a thin body, because such a face-pair is detected as a deeply penetrated one otherwise. The default value is five times the characteristic size of the faces. Decrease it for a coarse mesh of a small (thin) body.
 
+Faces in the region of interest
+-------------------------------
+The faces of a boundary region are selected by masks of the points of the mesh. Here, the bottom faces of the upper block are the secondary surface and the top faces of the lower block are the primary surface.
+
+..  pyvista-plot::
+    :context:
+
+    >>> contact = SolidBodyContact(
+    ...     solid,
+    ...     mask=np.logical_and(mesh.z > 1.0, mesh.z < 1.1),
+    ...     mask_primary=np.isclose(mesh.z, 1.0),
+    ... )
+
+The choice of the secondary surface matters: the contact tractions are evaluated at the integration points of the secondary surface. Use the softer and finer meshed surface as the secondary surface, e.g. the rubber surface of a rubber-to-metal contact. Alternatively, a two-pass contact evaluates the contact twice with exchanged roles of the surfaces, each with half of the contact potential. This removes the bias of the choice of the secondary surface at the expense of a doubled evaluation time.
+
+..  pyvista-plot::
+    :context:
+
+    >>> contact = SolidBodyContact(
+    ...     solid,
+    ...     mask=np.logical_and(mesh.z > 1.0, mesh.z < 1.1),
+    ...     mask_primary=np.isclose(mesh.z, 1.0),
+    ...     two_pass=True,
+    ... )
+
+Field containers on boundary regions
+------------------------------------
+Instead of solid bodies, field containers on boundary regions are accepted as contact surfaces. Then, the items for the estimation of the penalty stiffness have to be given. The bodies are identified by the cells of the boundary regions.
+
+..  pyvista-plot::
+    :context:
+
+    >>> mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
+    >>> secondary = fem.FieldContainer(
+    ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
+    ... )
+    >>> primary = fem.FieldContainer(
+    ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=np.isclose(mesh.z, 1.0)), dim=3)]
+    ... )
+    >>> contact = SolidBodyContact(secondary, primary, items=[solid])
+
+..  hint::
+
+    Prefer the solid bodies for contact surfaces with all faces on the outline of a mesh. The cells of a boundary region are not sufficient to identify a body with an enclosed cavity and a wall of more than two cells: its inner surface is detected as another body, which penetrates the outer surface.
+
 Multiple solid bodies
 ---------------------
-The bodies may also be given as individual solid bodies, e.g. with different materials. Their meshes have to share the same points, which is ensured by a :class:`~felupe.MeshContainer` with ``merge=True``. A contact surface is created for each mesh of the container and all solid bodies are passed to the contact for the estimation of the penalty stiffness.
+The bodies may also be given as individual solid bodies, e.g. with different materials. Their meshes have to share the same points, which is ensured by a :class:`~felupe.MeshContainer` with ``merge=True``. A contact surface is created for each solid body and both solid bodies are used for the estimation of the penalty stiffness.
 
 ..  pyvista-plot::
     :context:
@@ -107,11 +151,7 @@ The bodies may also be given as individual solid bodies, e.g. with different mat
     ...     fem.SolidBody(umat=fem.NeoHooke(mu=5.0, bulk=250.0), field=fields[0]),
     ...     fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=fields[1]),
     ... ]
-    >>> surfaces = [
-    ...     fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(m), dim=3)])
-    ...     for m in container
-    ... ]
-    >>> contact = SolidBodyContact(surfaces[1], surfaces[0], items=solids)
+    >>> contact = SolidBodyContact(solids[1], solids[0])
 
 Here, the softer upper block is the secondary surface. The boundary conditions are created on the merged field container and the contact is added to the items of the step, together with all solid bodies.
 

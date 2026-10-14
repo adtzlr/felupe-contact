@@ -4,7 +4,8 @@ Solid-body contact (sub-meshes)
 A rubber block is pressed on a (stiffer) block. Both blocks are meshed
 individually and are combined to a single mesh.
 
-Compared to Ex. 1 / 2, individual sub-meshes are used.
+Compared to Ex. 1 / 2, individual sub-meshes are used. The contact is created on the
+solid bodies of the sub-meshes.
 """
 
 # sphinx_gallery_thumbnail_number = -1
@@ -25,16 +26,11 @@ field = fem.field.merge(fields)
 solids = [fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=f) for f in fields]
 
 # %%
-# The contact surfaces are created as boundary regions on the same mesh. In contrast to
-# Ex. 1, no mask is used: all faces on the outline of the mesh are contact surfaces. The
-# contact search discards the face-pairs which are not able to touch each other, i.e.
-# the faces which belong to the same body and the faces which are located around a
-# corner.
-fields_boundary = [
-    fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(m), dim=3)])
-    for m in container
-]
-contact = SolidBodyContact(*fields_boundary, items=solids)
+# The contact is created between the solid bodies of the sub-meshes. The boundary
+# regions with all faces on the outline of the sub-meshes are created automatically.
+# The lower solid body is the secondary and the upper solid body is the primary body.
+# The penalty stiffness is estimated from both solid bodies.
+contact = SolidBodyContact(*solids)
 
 # %%
 # The bottom face of the lower block is fixed and the top face of the upper block is

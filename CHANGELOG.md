@@ -47,6 +47,40 @@ All notable changes to this project will be documented in this file. The format 
   possible to use all faces on the outline of a mesh as contact surfaces, i.e. without
   restricting the boundary regions to the region of interest.
 - Added a test suite in `tests/`, which covers the package by 100%.
+- Added a mode of `SolidBodyContact` which works with solid bodies directly, e.g.
+  `SolidBodyContact(solid)` or `SolidBodyContact(solid_a, solid_b)`. The boundary region
+  is created for the region of the displacement field of a solid body by the dict
+  `felupe_contact._boundary.BOUNDARY_REGIONS` (region -> boundary region, e.g.
+  `RegionHexahedron` -> `RegionHexahedronBoundary`) with a displacement field of the
+  same type, whose values are linked to the solid body. All faces on the outline of the
+  mesh are used, or the faces within the new arguments `mask` and `mask_primary`. A
+  field container on the region of a solid body is supported as well. The argument
+  `field_primary` is now optional: if None, the secondary surface is also the primary
+  surface. If no `items` are given, the solid bodies are used to estimate the penalty
+  stiffness. Field containers on boundary regions are still supported.
+- Added `felupe_contact._boundary.boundary_region()` and
+  `felupe_contact._boundary.contact_surface()`, which create the contact surfaces of
+  the solid bodies.
+- Added `BatchedElement.evaluate()`, which evaluates the shape functions and all their
+  first and second partial derivatives by a single evaluation of the monomials and a
+  single matrix product. The coefficients of the derivatives are stacked on initiation.
+- Added `BatchedElement.control_net()`, which returns the transformation of the points
+  of a face into the control points of a Bézier patch on an extended range of the
+  natural element coordinates. The convex hull of the control points contains the face,
+  which gives rigorous bounds of the faces for the contact search.
+- Added `ContactSurfacePair.bounds()`, `ContactSurfacePair.candidates()` and
+  `ContactSurfacePair.discard()`, the phases of the contact search before the
+  closest-point projection, see the changes of the contact search below.
+- Added the property `ContactSurfacePair.nneighbours`, the maximum number of faces of
+  the primary surface which share a point with a face of the secondary surface.
+- Added a warning for self-contact, if integration points are in contact with their own
+  body in the undeformed configuration, i.e. if `max_distance` exceeds the thickness of
+  a body.
+- Added `ContactSurfacePair.dofs()`, `ContactSurfacePair.vector()` and
+  `ContactSurfacePair.matrix()`, which return the degrees of freedom and the force
+  vectors and stiffness matrices of the face-pairs, and the helpers `sparse_vector()`,
+  `sparsity_pattern()` and `sparse_matrix()` for their assembly.
+- Added the tests `tests/test_solidbody_mode.py` and `tests/test_contact_search.py`.
 - Added the documentation, which is built by Sphinx (with the PyData theme, like FElupe)
   on Read the Docs. It contains an API reference and a gallery of the examples, which
   are run by Sphinx-Gallery. The documentation was configured in `.readthedocs.yaml` but
@@ -76,6 +110,15 @@ All notable changes to this project will be documented in this file. The format 
   of FElupe are detected before they are released.
 
 ### Fixed
+- Fixed the connected bodies of a body with an enclosed cavity. The bodies were
+  identified by the cells of the boundary regions, which are disconnected for a wall
+  of more than two cells, i.e. the inner surface was detected as another body which
+  penetrates the outer surface, even in the undeformed configuration. Now, the cells
+  of the solid bodies are used if solid bodies are given.
+- Fixed the contact search for self-contact if all faces on the outline of a mesh are
+  used. The neighbours of a face occupied the candidates of the tree-query, i.e. some
+  contact partners were not found. Now, the maximum number of neighbours is added to
+  the number of candidates for self-contact.
 - Fixed the package metadata: the project is named `felupe-contact` and its version is
   read from `felupe_contact.__about__`. Both were set to `felupe`, which made the build
   fail with `ModuleNotFoundError: No module named 'felupe'`.
@@ -102,6 +145,39 @@ All notable changes to this project will be documented in this file. The format 
   are not in contact if other integration points are in contact.
 
 ### Changed
+- Changed the contact search of `ContactSurfacePair.kinematics()`, which is about ten
+  times faster for contact surfaces with all faces on the outline of the meshes and
+  about 60 times faster for many bodies (the results are unchanged):
+  - The bounds of the faces of the primary surface (a sphere, the heights w.r.t. the
+    tangent plane at the center, a bounding box and the maximum angle of the normal
+    vectors) are evaluated on the extended range of the natural element coordinates of
+    valid projections. Cheap and rigorous criteria discard the candidate face-pairs of
+    the tree-query which are not able to touch before the expensive closest-point
+    projection. These criteria are evaluated one after another on the remaining
+    face-pairs.
+  - Only the integration points within the bounding box of a body (enlarged by the
+    maximum distance) are queried for the faces of this body, i.e. the effort doesn't
+    grow quadratically with the number of bodies. The tree-query is limited by the
+    maximum reach of the faces.
+  - The face of the previous evaluation is always a candidate (hysteresis), even if it
+    is not among the nearest faces of the tree-query.
+  - The neighbours of the faces are only checked for self-contact. Without
+    self-contact, they belong to the same body and are skipped by the tree-query.
+- Changed `closest_point_projection()` to iterate only the pairs which are not
+  converged yet (active set) and to evaluate the shape functions and their derivatives
+  at once by `BatchedElement.evaluate()`.
+- Changed the assembly of the contact stiffness matrix: the stiffness matrix of a
+  face-pair is evaluated by a single contraction of the stacked variations of both
+  faces instead of three blocks and the matrices of all surface pairs are summed up at
+  once by the sparsity pattern of FElupe (`felupe.assembly._sparsity.SparsityPattern`).
+  The sparsity pattern is re-used as long as the face-pairs in contact don't change.
+  The force vector is summed up by `numpy.bincount()`. Both replace the conversion of
+  all values from the COO- to the CSR-format and the addition of sparse matrices,
+  which is about three times faster.
+- Changed `connected_bodies()` to support a list of point-connectivities, e.g. of
+  cells with different numbers of points.
+- Changed Ex. 2 and Ex. 3 to create the contact on the solid bodies and the README to
+  the solid-body mode of `SolidBodyContact`.
 - Changed the assembly of the block of the contact stiffness matrix and of the part of
   the contact force vector, which contain only test- and trial-functions of the
   secondary surface, from an `IntegralForm` to the direct assembly which is already used
@@ -160,6 +236,12 @@ All notable changes to this project will be documented in this file. The format 
   points in contact was printed.
 
 ### Removed
+- Removed the argument `order` of `BatchedElement.monomials()`. The partial
+  derivatives of the shape functions are evaluated by the stacked coefficients of the
+  derivatives instead of differentiating the monomials on each evaluation.
+- Removed `ContactSurfacePair._assemble()` and `ContactSurfacePair._indices()` in favour
+  of `ContactSurfacePair.dofs()` and the helpers `sparse_vector()` and
+  `sparse_matrix()`.
 - Removed `shape_function_quad()` and the hard-coded second derivative of the shape
   functions of a bilinear quad. Both are already available in `felupe.Quad`, which
   evaluates its shape functions, their gradients and their hessians for a batch of

@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import warnings
+from functools import cached_property
+from types import SimpleNamespace
 
 import numpy as np
-from felupe import Field, FieldAxisymmetric, FieldPlaneStrain
+from felupe import Field, FieldAxisymmetric, FieldContainer, FieldPlaneStrain
+from felupe.assembly._sparsity import SparsityPattern
 from felupe.math import cross, det, dot, dya, inv, norm, transpose
 from felupe.mechanics import Assemble, Results
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
+from ._boundary import contact_surface
 from ._element import face_element
 
 # the field types which define the out-of-plane behaviour of a contact surface, given
@@ -59,8 +63,9 @@ def connected_bodies(cells, npoints):
 
     Parameters
     ----------
-    cells : ndarray of shape (ncells, npoints_per_cell)
-        The point-connectivity of the cells of a mesh.
+    cells : ndarray of shape (ncells, npoints_per_cell) or list of ndarray
+        The point-connectivity of the cells of a mesh. A list of point-connectivities,
+        e.g. of cells with different numbers of points, is also supported.
     npoints : int
         The number of points of the mesh.
 
@@ -71,16 +76,112 @@ def connected_bodies(cells, npoints):
         to any cell are labelled individually.
     """
 
+    if not isinstance(cells, (list, tuple)):
+        cells = [cells]
+
     # it is sufficient to connect the points of a cell to its first point: this results
     # in the same connected components as a fully-connected cell
-    rows = np.repeat(cells[:, 0], cells.shape[1] - 1)
-    cols = cells[:, 1:].ravel()
+    rows = np.concatenate([np.repeat(c[:, 0], c.shape[1] - 1) for c in cells])
+    cols = np.concatenate([c[:, 1:].ravel() for c in cells])
 
     graph = coo_matrix(
         (np.ones(len(rows), dtype=bool), (rows, cols)), shape=(npoints, npoints)
     )
 
     return connected_components(graph, directed=False, return_labels=True)[1]
+
+
+def sparse_vector(values, dofs, size):
+    """Return a sparse vector, assembled from the vectors of the face-pairs.
+
+    Parameters
+    ----------
+    values : ndarray of shape (n, npairs)
+        The vectors of the face-pairs.
+    dofs : ndarray of shape (npairs, n)
+        The degrees of freedom of the face-pairs.
+    size : int
+        The size of the vector.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The sparse vector of shape (size, 1).
+
+    Notes
+    -----
+    The values are summed up into a dense array by :func:`numpy.bincount`, like the
+    values of an integral form are summed up into the data array of a sparsity pattern
+    by FElupe. This replaces the conversion of all (duplicate) values from the
+    coordinate (COO) to the CSR format.
+    """
+
+    vector = np.bincount(dofs.T.ravel(), weights=values.ravel(), minlength=size)
+
+    return csr_matrix(vector.reshape(-1, 1))
+
+
+def sparsity_pattern(dofs, size, dim):
+    """Return the sparsity pattern of the stiffness matrices of the face-pairs.
+
+    Parameters
+    ----------
+    dofs : ndarray of shape (npairs, n)
+        The degrees of freedom of the face-pairs, numbered point-wise (``dof = point *
+        dim + i``).
+    size : int
+        The number of rows and columns of the matrix.
+    dim : int
+        The number of the components per point.
+
+    Returns
+    -------
+    felupe.assembly._sparsity.SparsityPattern
+        The sparsity pattern of FElupe.
+
+    Notes
+    -----
+    The sparsity pattern of FElupe is created for a test and a trial field. Here, the
+    face-pairs are the cells and their degrees of freedom are passed like the indices
+    ``cai`` of a field, i.e. of shape ``(cell, a, i)`` with the points ``a`` of both
+    faces of a face-pair.
+    """
+
+    indices = SimpleNamespace(cai=dofs.reshape(len(dofs), -1, dim), shape=(size,))
+    field = SimpleNamespace(indices=indices)
+
+    return SparsityPattern(field, field)
+
+
+def sparse_matrix(values, pattern, dim):
+    """Return a sparse matrix, assembled from the stiffness matrices of the face-pairs
+    by a sparsity pattern of FElupe.
+
+    Parameters
+    ----------
+    values : ndarray of shape (n, n, npairs)
+        The stiffness matrices of the face-pairs.
+    pattern : felupe.assembly._sparsity.SparsityPattern
+        The sparsity pattern of the face-pairs, see :func:`sparsity_pattern`.
+    dim : int
+        The number of the components per point.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The sparse matrix.
+
+    Notes
+    -----
+    The values are summed up into the data array of the CSR format by
+    :func:`numpy.bincount`. This is about twice as fast as the conversion of all
+    (duplicate) values from the coordinate (COO) to the CSR format, see the sparsity
+    pattern of FElupe.
+    """
+
+    n, npairs = values.shape[1:]
+
+    return pattern.assemble(values.reshape(n // dim, dim, n // dim, dim, npairs))
 
 
 def closest_point_projection(points, vertices, element, maxiter=12, tol=1e-10):
@@ -129,20 +230,30 @@ def closest_point_projection(points, vertices, element, maxiter=12, tol=1e-10):
     located far away from a face. In this case, the Gauss-Newton approximation
     :math:`a_{\alpha\beta}` is used instead, which is always positive definite. This
     ensures a descent direction and hence a robust iteration for all pairs.
+
+    Only the pairs which are not converged yet are iterated (active set), i.e. a few
+    slowly converging pairs don't keep all other pairs in the iteration. The shape
+    functions and their derivatives are evaluated at once by
+    :meth:`BatchedElement.evaluate() <felupe_contact._element.BatchedElement.evaluate>`.
     """
 
     coordinates = np.zeros((element.dim, points.shape[-1]))
     dcoordinates = np.zeros_like(coordinates)
 
-    for _ in range(maxiter):
-        h = element.function(coordinates)
-        dhdr = element.gradient(coordinates)
-        d2hdrdr = element.hessian(coordinates)
+    # the pairs which are not converged yet
+    active = np.arange(points.shape[-1])
 
-        x = np.einsum("ap,aip->ip", h, vertices)
-        a = np.einsum("aJp,aip->Jip", dhdr, vertices)
-        dadr = np.einsum("aJKp,aip->JKip", d2hdrdr, vertices)
-        d = points - x
+    for _ in range(maxiter):
+        if len(active) == 0:
+            break
+
+        h, dhdr, d2hdrdr = element.evaluate(coordinates[:, active])
+        vertices_active = vertices[..., active]
+
+        x = np.einsum("ap,aip->ip", h, vertices_active)
+        a = np.einsum("aJp,aip->Jip", dhdr, vertices_active)
+        dadr = np.einsum("aJKp,aip->JKip", d2hdrdr, vertices_active)
+        d = points[:, active] - x
 
         # negative gradient of the objective function
         fun = dot(a, d, mode=(2, 1))
@@ -160,16 +271,15 @@ def closest_point_projection(points, vertices, element, maxiter=12, tol=1e-10):
         determinant = det(hessian)
         np.copyto(determinant, 1.0, where=np.abs(determinant) < np.finfo(float).tiny)
 
-        dcoordinates = dot(inv(hessian, determinant=determinant), fun, mode=(2, 1))
+        step = dot(inv(hessian, determinant=determinant), fun, mode=(2, 1))
 
         # limit the step size (trust region) and the range of the natural element
         # coordinates: only projections inside (or close to) a face are used
-        np.clip(dcoordinates, -1.0, 1.0, out=dcoordinates)
-        coordinates += dcoordinates
-        np.clip(coordinates, -2.0, 2.0, out=coordinates)
+        np.clip(step, -1.0, 1.0, out=step)
+        coordinates[:, active] = np.clip(coordinates[:, active] + step, -2.0, 2.0)
+        dcoordinates[:, active] = step
 
-        if np.all(np.abs(dcoordinates) < tol):
-            break
+        active = active[np.any(np.abs(step) >= tol, axis=0)]
 
     return coordinates, np.all(np.abs(dcoordinates) < np.sqrt(tol), axis=0)
 
@@ -190,6 +300,10 @@ class ContactSurfacePair:
         primary surface.
     weight : float, optional
         A scale factor for the contributions of this surface pair (default is 1.0).
+    cells : list of ndarray of shape (ncells, npoints_per_cell) or None, optional
+        The point-connectivities of the cells of the solid bodies, which are used to
+        identify the connected bodies of the mesh (default is None). If None, the cells
+        of both boundary regions are used.
 
     Notes
     -----
@@ -209,7 +323,7 @@ class ContactSurfacePair:
     is faster than a layout with leading batch-axes.
     """
 
-    def __init__(self, field, field_primary, weight=1.0):
+    def __init__(self, field, field_primary, weight=1.0, cells=None):
         self.field = field
         self.field_primary = field_primary
         self.weight = weight
@@ -302,13 +416,22 @@ class ContactSurfacePair:
         )
 
         # the connected bodies of the mesh: two faces which belong to the same body
-        # are never in contact, unless self-contact is considered
-        labels = connected_bodies(
-            np.vstack([region.mesh.cells, region_primary.mesh.cells]),
-            region.mesh.npoints,
-        )
+        # are never in contact, unless self-contact is considered. the cells of the
+        # boundary regions are not sufficient for a body with an enclosed cavity: the
+        # cells at the surface of the cavity and at the outer surface are disconnected
+        # if the wall is thicker than two cells
+        if cells is None:
+            cells = [region.mesh.cells, region_primary.mesh.cells]
+
+        self.npoints_mesh = region.mesh.npoints
+
+        labels = connected_bodies(cells, self.npoints_mesh)
         self.body = labels[self.cells_faces[:, 0]]
         self.body_primary = labels[self.cells_faces_primary[:, 0]]
+
+        # the body of each integration point of the secondary surface. the integration
+        # points are ordered by their quadrature point first, i.e. point = q * ncells + c
+        self.body_points = np.tile(self.body, self.dV.shape[0])
 
         self.points = np.unique(self.cells_faces)
         self.points_primary = np.unique(self.cells_faces_primary)
@@ -436,6 +559,298 @@ class ContactSurfacePair:
 
         return unit_normals(tangents, self.orientation)
 
+    @cached_property
+    def nneighbours(self):
+        """The maximum number of faces of the primary surface which share at least one
+        point with a face of the secondary surface (including the face itself, if both
+        surfaces overlap). These faces are never in contact, but they occupy the
+        candidates of a tree-query for self-contact."""
+
+        def incidence(cells_faces):
+            nfaces, npoints_per_face = cells_faces.shape
+            rows = np.repeat(np.arange(nfaces), npoints_per_face)
+            return csr_matrix(
+                (np.ones(rows.size), (rows, cells_faces.ravel())),
+                shape=(nfaces, self.npoints_mesh),
+            )
+
+        shared = incidence(self.cells_faces) @ incidence(self.cells_faces_primary).T
+
+        return int(np.diff(shared.indptr).max())
+
+    def bounds(self, vertices, extent):
+        r"""Return the bounds of the faces of the primary surface, which are used by
+        the contact search to discard face-pairs before the closest-point projection.
+
+        Parameters
+        ----------
+        vertices : ndarray of shape (npoints_per_face, dim, ncells_primary)
+            The deformed coordinates of the points of the faces of the primary surface.
+        extent : float
+            The extent of the natural element coordinates of a face, i.e. the range of
+            valid projections is ``[-extent, extent]``.
+
+        Returns
+        -------
+        dict
+            A dict with the center :math:`\boldsymbol{c}` and the outward unit normal
+            vector :math:`\boldsymbol{n}_c` at the center of a face (the natural element
+            coordinates are zero), the radius of a sphere around the center, the upper
+            and the lower height of a face w.r.t. the tangent plane at its center, the
+            minimum and the maximum coordinates (bounding box) and the maximum angle
+            between the outward unit normal vectors of a face and the normal vector at
+            its center.
+
+        Notes
+        -----
+        A face on the extended range of its natural element coordinates is given by the
+        control points of a Bézier patch and it is located within their convex hull,
+        see :meth:`~felupe_contact._element.BatchedElement.control_net`. Hence, the
+        radius, the heights and the bounding box are rigorous bounds of a face. The
+        maximum angle of the normal vectors is sampled on a grid of natural element
+        coordinates, which includes the corners of the extended range, and it is
+        enlarged by a safety factor of 1.25. The sampled angle is exact for faces with
+        linear (unnormalized) normal vectors, i.e. for bilinear quads and for linear and
+        quadratic lines (edges). The angle of a strongly curved (bent) face, which is
+        90 degrees or more, is replaced by 180 degrees, i.e. it is not bounded.
+        """
+
+        element = self.element_primary
+
+        h, dhdr, _ = element.evaluate(np.zeros((element.dim, 1)))
+        center = np.einsum("a,aip->ip", h[:, 0], vertices)
+        tangents = np.einsum("aJ,aip->Jip", dhdr[..., 0], vertices)
+        normal = unit_normals(tangents, self.orientation_primary)
+
+        control = np.einsum("ja,aip->jip", element.control_net(extent), vertices)
+        offset = control - center
+        height = np.einsum("jip,ip->jp", offset, normal)
+
+        samples = element._grid(extent, refinement=2)
+        tangents = np.einsum("aJs,aip->Jisp", element.gradient(samples), vertices)
+        normals = unit_normals(tangents, self.orientation_primary)
+        cosine = np.einsum("isp,ip->sp", normals, normal).min(axis=0)
+
+        # the angle is not bounded if the normal vectors are turned by 90 degrees or
+        # more, i.e. no face-pair is discarded by the opposition of the normal vectors
+        angle = 1.25 * np.arccos(np.clip(cosine, -1.0, 1.0))
+        angle[angle >= np.pi / 2] = np.pi
+
+        return {
+            "center": center,
+            "normal": normal,
+            "radius": norm(offset, axis=1).max(axis=0),
+            "upper": height.max(axis=0),
+            "lower": height.min(axis=0),
+            "min": control.min(axis=0),
+            "max": control.max(axis=0),
+            "angle": angle,
+        }
+
+    def candidates(
+        self, points, bounds, max_distance, candidates, self_contact, workers
+    ):
+        r"""Return the candidate face-pairs of the broad-phase contact search.
+
+        Parameters
+        ----------
+        points : ndarray of shape (dim, npoints)
+            The deformed coordinates of the integration points of the secondary surface.
+        bounds : dict
+            The bounds of the faces of the primary surface, see :meth:`bounds`.
+        max_distance : float
+            The maximum distance between an integration point and a face of the primary
+            surface which is considered by the contact search.
+        candidates : int
+            The number of candidate faces of the primary surface per integration point.
+        self_contact : bool
+            Flag to consider face-pairs which belong to the same body of the mesh.
+        workers : int
+            The number of workers used for the tree-query.
+
+        Returns
+        -------
+        point : ndarray of shape (npairs,)
+            The integration points of the candidate face-pairs.
+        face : ndarray of shape (npairs,)
+            The faces of the primary surface of the candidate face-pairs.
+
+        Notes
+        -----
+        The nearest faces of the primary surface are found by a tree-query on the face
+        centers. The tree-query is carried out per body of the primary surface, where
+        the faces of the own body of an integration point are skipped. Otherwise the
+        faces of the own body, which are always the closest ones, would occupy the
+        candidates of a query and hide the faces of the other bodies. This is essential
+        if the contact surfaces are not restricted to the region of interest, e.g. if
+        all faces on the outline of a mesh are used.
+
+        Only the integration points within the bounding box of a body, enlarged by the
+        maximum distance, are queried, i.e. the effort of the contact search does not
+        grow quadratically with the number of bodies. For self-contact, the faces which
+        share a point with the face of an integration point (its neighbours) occupy
+        candidates of the query. Hence, their (maximum) number is added to the number of
+        candidates.
+
+        The face of the previous evaluation is always a candidate (hysteresis). An
+        integration point is kept on its face, even if the face is not among the
+        nearest faces of the tree-query.
+        """
+
+        npoints = points.shape[-1]
+        nfaces = self.ncells_primary
+        reach = bounds["radius"] + max_distance
+
+        if self_contact:
+            groups = [
+                (np.arange(npoints), np.arange(nfaces), candidates + self.nneighbours)
+            ]
+        else:
+            groups = []
+            for body in np.unique(self.body_primary):
+                cols = np.flatnonzero(self.body_primary == body)
+                rows = np.flatnonzero(self.body_points != body)
+
+                # the bounding box of the faces of the body, enlarged by the distance
+                lower = bounds["min"][:, cols].min(axis=1) - max_distance
+                upper = bounds["max"][:, cols].max(axis=1) + max_distance
+
+                x = points[:, rows].T
+                rows = rows[np.all((x >= lower) & (x <= upper), axis=1)]
+
+                groups.append((rows, cols, candidates))
+
+        # the faces of the previous evaluation
+        previous = np.flatnonzero(self.face >= 0)
+        point, face = [previous], [self.face[previous]]
+
+        for rows, cols, k in groups:
+            if len(rows) == 0:
+                continue
+
+            k = min(k, len(cols))
+            tree = cKDTree(bounds["center"][:, cols].T)
+            distance, nearest = tree.query(
+                points[:, rows].T,
+                k=k,
+                distance_upper_bound=reach[cols].max() * (1 + 1e-9),
+                workers=workers,
+            )
+
+            # missing neighbours are returned with an index which equals the number of
+            # the faces of the tree and an infinite distance
+            distance = distance.reshape(len(rows), k)
+            nearest = nearest.reshape(len(rows), k)
+            found = nearest < len(cols)
+            nearest = cols[np.where(found, nearest, 0)]
+
+            # discard pairs which are too far away
+            mask = found & (distance <= reach[nearest])
+
+            point.append(np.broadcast_to(rows[:, None], mask.shape)[mask])
+            face.append(nearest[mask])
+
+        # a face of the previous evaluation may be found twice, which is harmless: the
+        # duplicate face-pairs are equal and only one of them is selected
+        return np.concatenate(point), np.concatenate(face)
+
+    def discard(self, point, face, points, bounds, normals, max_distance, facing):
+        r"""Return the candidate face-pairs which are able to touch, i.e. discard the
+        face-pairs for which the contact search would not find a valid projection.
+
+        Parameters
+        ----------
+        point : ndarray of shape (npairs,)
+            The integration points of the candidate face-pairs.
+        face : ndarray of shape (npairs,)
+            The faces of the primary surface of the candidate face-pairs.
+        points : ndarray of shape (dim, npoints)
+            The deformed coordinates of the integration points of the secondary surface.
+        bounds : dict
+            The bounds of the faces of the primary surface, see :meth:`bounds`.
+        normals : ndarray of shape (dim, ncells)
+            The outward unit normal vectors of the faces of the secondary surface.
+        max_distance : float
+            The maximum distance between an integration point and a face of the primary
+            surface which is considered by the contact search.
+        facing : float
+            The minimum opposition of the outward unit normal vectors of a face-pair.
+
+        Returns
+        -------
+        point : ndarray
+            The integration points of the remaining face-pairs.
+        face : ndarray
+            The faces of the primary surface of the remaining face-pairs.
+
+        Notes
+        -----
+        A valid projection :math:`\bar{\boldsymbol{x}}` of an integration point
+        :math:`\boldsymbol{x} = \bar{\boldsymbol{x}} + g\ \boldsymbol{n}` is located on
+        the (extended) face with a negative gap :math:`-g_{max} < g < 0`. The heights
+        :math:`h_{min} \le (\bar{\boldsymbol{x}} - \boldsymbol{c}) \cdot
+        \boldsymbol{n}_c \le h_{max}` of a face w.r.t. the tangent plane at its center
+        and the maximum angle :math:`\theta` between its normal vectors and the normal
+        vector at its center are known, see :meth:`bounds`. Hence, the height of a valid
+        integration point is bounded, see Eq. :eq:`contact-height`.
+
+        ..  math::
+            :label: contact-height
+
+            h_{min} - g_{max} \le
+                (\boldsymbol{x} - \boldsymbol{c}) \cdot \boldsymbol{n}_c
+            \le h_{max} \quad \text{if} \quad \theta < \frac{\pi}{2}
+
+        Its in-plane distance to the center is bounded by the radius :math:`r` of the
+        face and the in-plane component of the gap vector,
+        :math:`r + g_{max} \sin(\theta)`. The outward unit normal vector of the face of
+        the integration point must be opposed to the normal vector at the projection,
+        i.e. the angle between this normal vector and :math:`\boldsymbol{n}_c` must be
+        greater than :math:`\arccos(-facing) - \theta`.
+
+        These criteria are rigorous (up to the sampled angle) and cheap. They discard
+        most of the candidate face-pairs of the tree-query, e.g. the faces of bodies
+        which are close to but not in contact with each other, without an expensive
+        closest-point projection.
+        """
+
+        center, normal = bounds["center"], bounds["normal"]
+        radius, angle = bounds["radius"], bounds["angle"]
+
+        # the limits per face. a tolerance is added for the converged projections. the
+        # bounds of the height and of the in-plane distance are only valid if the
+        # normal vectors of a face are not turned by 90 degrees or more w.r.t. the
+        # normal vector at its center
+        tolerance = 1e-3 * radius
+        bent = angle >= np.pi / 2
+
+        upper = np.where(bent, np.inf, bounds["upper"] + tolerance)
+        lower = np.where(bent, -np.inf, bounds["lower"] - max_distance - tolerance)
+        inplane = np.where(bent, np.inf, radius + max_distance * np.sin(angle))
+        inplane += tolerance
+
+        # the outward unit normal vectors of the faces must be able to be opposed
+        limit = np.arccos(np.clip(-facing, -1.0, 1.0)) - angle
+        opposition = np.where(limit > 0, np.cos(limit), np.inf)
+
+        # the criteria are evaluated one after another on the remaining face-pairs,
+        # starting with the cheapest and most selective one: the height
+        n = normal[:, face]
+        offset = np.einsum("ip,ip->p", center, normal)[face]
+        height = np.einsum("ip,ip->p", points[:, point], n) - offset
+
+        keep = (height <= upper[face]) & (height >= lower[face])
+        point, face, n, height = point[keep], face[keep], n[:, keep], height[keep]
+
+        opposed = np.einsum("ip,ip->p", normals[:, point % self.ncells], n)
+        keep = opposed < opposition[face]
+        point, face, height = point[keep], face[keep], height[keep]
+
+        d = points[:, point] - center[:, face]
+        keep = np.einsum("ip,ip->p", d, d) - height**2 <= inplane[face] ** 2
+
+        return point[keep], face[keep]
+
     def kinematics(
         self, x, max_distance, candidates, tolerance, facing, self_contact, workers=1
     ):
@@ -470,58 +885,51 @@ class ContactSurfacePair:
         dict or None
             A dict with the contact kinematics of the active integration points. None
             is returned if no integration point is in contact.
+
+        Notes
+        -----
+        The contact search is carried out in three phases:
+
+        1.  The broad phase finds the nearest faces of the primary surface by a
+            tree-query, see :meth:`candidates`.
+        2.  Cheap and rigorous criteria discard the face-pairs which are not able to
+            touch, see :meth:`discard`.
+        3.  The narrow phase projects the integration points on the remaining faces,
+            see :func:`closest_point_projection`, and checks the validity of the
+            projections.
         """
 
         # deformed coordinates of the integration points of the secondary surface
         self.deformed.values = x
         points = self.deformed.interpolate().reshape(self.dim, -1)
 
-        # deformed coordinates of the points of the faces of the primary surface
+        # deformed coordinates of the points of the faces of the primary surface and
+        # their bounds on the range of (released) valid projections
         vertices = self.vertices(x, self.cells_faces_primary)
+        bounds = self.bounds(vertices, extent=1 + 2 * tolerance)
+        normals = self.normals(x)
 
-        # broad-phase contact search: find the nearest faces of the primary surface by
-        # a tree-query on the face centers. the tree operates on point-arrays with the
-        # coordinates on the trailing axis
-        center = vertices.mean(axis=0)
-        radius = norm(vertices - center, axis=1).max(axis=0)
+        # broad-phase contact search
+        point, face = self.candidates(
+            points, bounds, max_distance, candidates, self_contact, workers
+        )
+        point, face = self.discard(
+            point, face, points, bounds, normals, max_distance, facing
+        )
 
-        # the tree-query is carried out per body of the primary surface, where the
-        # faces of the own body of an integration point are skipped. otherwise the
-        # faces of the own body, which are always the closest ones, would occupy the
-        # candidates of a query and hide the faces of the other bodies. this is
-        # essential if the contact surfaces are not restricted to the region of
-        # interest, e.g. if all faces on the outline of a mesh are used
-        npoints = points.shape[-1]
+        cell = point % self.ncells
+
+        # faces which share at least one point are neighbours and must not be in
+        # contact. this also removes the projections of a face on itself, which occur
+        # if the masks of both boundary regions are overlapping. neighbours belong to
+        # the same body, i.e. they are already skipped without self-contact
         if self_contact:
-            groups = [(np.arange(npoints), np.arange(self.ncells_primary))]
-        else:
-            body = np.tile(self.body, npoints // self.ncells)
-            groups = [
-                (np.flatnonzero(body != b), np.flatnonzero(self.body_primary == b))
-                for b in np.unique(self.body_primary)
-            ]
-
-        point, face = [], []
-        for rows, cols in groups:
-            if len(rows) == 0 or len(cols) == 0:
-                continue
-
-            tree = cKDTree(center[:, cols].T)
-            k = min(candidates, len(cols))
-            distance, nearest = tree.query(points[:, rows].T, k=k, workers=workers)
-
-            distance = distance.reshape(len(rows), k)
-            nearest = cols[nearest.reshape(len(rows), k)]
-
-            # discard pairs which are too far away
-            mask = distance <= radius[nearest] + max_distance
-
-            point.append(np.broadcast_to(rows[:, None], mask.shape)[mask])
-            face.append(nearest[mask])
-
-        empty = np.zeros(0, dtype=int)
-        point = np.concatenate(point) if point else empty
-        face = np.concatenate(face) if face else empty
+            neighbour = np.any(
+                self.cells_faces[cell][:, :, None]
+                == self.cells_faces_primary[face][:, None, :],
+                axis=(1, 2),
+            )
+            point, face, cell = point[~neighbour], face[~neighbour], cell[~neighbour]
 
         # no integration point is in contact, i.e. no face is assigned for the next
         # evaluation (like for the integration points which are not in contact below)
@@ -535,9 +943,7 @@ class ContactSurfacePair:
             points[:, point], vertices_face, self.element_primary
         )
 
-        h = self.element_primary.function(coordinates)
-        dhdr = self.element_primary.gradient(coordinates)
-        d2hdrdr = self.element_primary.hessian(coordinates)
+        h, dhdr, d2hdrdr = self.element_primary.evaluate(coordinates)
 
         xp = np.einsum("ap,aip->ip", h, vertices_face)
         a = np.einsum("aJp,aip->Jip", dhdr, vertices_face)
@@ -558,22 +964,12 @@ class ContactSurfacePair:
         H = metric - gap * curvature
         minimum = (det(H) > 0) & (H[0, 0] > 0)
 
-        # faces which share at least one point are neighbours and must not be in
-        # contact. this also removes the projections of a face on itself, which occur
-        # if the masks of both boundary regions are overlapping
-        cell = point % self.ncells
-        cells = self.cells_faces[cell]
-        neighbour = np.any(
-            cells[:, :, None] == self.cells_faces_primary[face][:, None, :],
-            axis=(1, 2),
-        )
-
         # two faces are only able to touch each other if their outward unit normal
         # vectors are opposed. without this criterion, a face detects another face,
         # which is located around a corner, as a valid contact partner. this occurs if
         # the contact surfaces are not restricted to the region of interest, e.g. if
         # all faces on the outline of a mesh are used
-        opposed = dot(self.normals(x)[:, cell], normal, mode=(1, 1)) < -facing
+        opposed = dot(normals[:, cell], normal, mode=(1, 1)) < -facing
 
         # the face of the previous evaluation is released with a doubled tolerance.
         # this hysteresis prevents an oscillating activation of integration points
@@ -585,13 +981,7 @@ class ContactSurfacePair:
         # surface and if the (signed) distance is within the search distance
         inside = np.all(np.abs(coordinates) <= 1 + released, axis=0)
         valid = (
-            converged
-            & minimum
-            & inside
-            & opposed
-            & ~neighbour
-            & (gap < 0)
-            & (gap > -max_distance)
+            converged & minimum & inside & opposed & (gap < 0) & (gap > -max_distance)
         )
 
         if not np.any(valid):
@@ -738,20 +1128,36 @@ class ContactSurfacePair:
 
         return b, A, B
 
-    def _indices(self, kinematics):
-        "Return the row- and column-indices of the dofs of the face-pairs."
+    def dofs(self, kinematics):
+        """Return the degrees of freedom of the face-pairs, i.e. the components of the
+        displacements of the points of the face of the secondary surface followed by
+        those of the face of the primary surface.
+
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+
+        Returns
+        -------
+        ndarray of shape (npairs, nvars + nvars_primary)
+            The degrees of freedom of the face-pairs.
+        """
 
         cell = kinematics["point"] % self.ncells
 
-        return (
-            self.dof[self.cells_faces[cell]].reshape(-1, self.nvars),
-            self.dof[self.cells_faces_primary[kinematics["face"]]].reshape(
-                -1, self.nvars_primary
-            ),
+        return np.concatenate(
+            [
+                self.dof[self.cells_faces[cell]].reshape(-1, self.nvars),
+                self.dof[self.cells_faces_primary[kinematics["face"]]].reshape(
+                    -1, self.nvars_primary
+                ),
+            ],
+            axis=1,
         )
 
-    def assemble_vector(self, kinematics, gradient):
-        r"""Return the assembled sparse contact force vector.
+    def vector(self, kinematics, gradient):
+        r"""Return the contact force vectors of the face-pairs.
 
         Parameters
         ----------
@@ -763,8 +1169,9 @@ class ContactSurfacePair:
 
         Returns
         -------
-        scipy.sparse.csr_matrix
-            The assembled sparse contact force vector.
+        ndarray of shape (nvars + nvars_primary, npairs)
+            The contact force vectors of the face-pairs, given for the degrees of
+            freedom of :meth:`dofs`.
 
         Notes
         -----
@@ -783,15 +1190,131 @@ class ContactSurfacePair:
         q, c = np.divmod(kinematics["point"], self.ncells)
         dA = self.weight * self.dA[q, c] * gradient
 
-        force = csr_matrix((self.ndof, 1))
+        return dA * np.concatenate(self.variations_gap(kinematics))
 
-        for b, rows in zip(self.variations_gap(kinematics), self._indices(kinematics)):
-            force += self._assemble(dA * b, rows)
+    def assemble_vector(self, kinematics, gradient):
+        r"""Return the assembled sparse contact force vector, see :meth:`vector`.
 
-        return force
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+        gradient : ndarray of shape (npairs,)
+            The first derivative :math:`\Phi'(g)` of the contact potential w.r.t. the
+            gap, i.e. the negative contact pressure.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            The assembled sparse contact force vector.
+        """
+
+        values = self.vector(kinematics, gradient)
+
+        return sparse_vector(values, self.dofs(kinematics), size=self.ndof)
+
+    def matrix(self, kinematics, gradient, hessian, geometric=True):
+        r"""Return the contact stiffness matrices of the face-pairs.
+
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+        gradient : ndarray of shape (npairs,)
+            The first derivative :math:`\Phi'(g)` of the contact potential w.r.t. the
+            gap, i.e. the negative contact pressure.
+        hessian : ndarray of shape (npairs,)
+            The second derivative :math:`\Phi''(g)` of the contact potential w.r.t. the
+            gap.
+        geometric : bool, optional
+            Flag to add the geometric part of the contact stiffness matrix (default is
+            True).
+
+        Returns
+        -------
+        ndarray of shape (nvars + nvars_primary, nvars + nvars_primary, npairs)
+            The contact stiffness matrices of the face-pairs, given for the degrees of
+            freedom of :meth:`dofs`.
+
+        Notes
+        -----
+        The linearization of the variation of the gap is given in Eq.
+        :eq:`contact-linearization` with the modified metric
+        :math:`H_{\alpha\beta} = a_{\alpha\beta} - g\ \kappa_{\alpha\beta}` and
+        :math:`M^{\alpha\beta} = a^{\alpha\gamma} \kappa_{\gamma\delta} H^{\delta\beta}`
+        . The resulting stiffness matrix is symmetric.
+
+        ..  math::
+            :label: contact-linearization
+
+            \Delta \delta g = &-H^{\alpha\beta} \left(
+                A_\alpha \Delta B_\beta + B_\alpha \Delta A_\beta
+            \right)
+
+            &- g\ H^{\alpha\beta} A_\alpha \Delta A_\beta
+             - M^{\alpha\beta} B_\alpha \Delta B_\beta
+
+        The variations of both faces of a face-pair are stacked, where the variation
+        :math:`A_\alpha` is zero for the face of the secondary surface. Then, the
+        stiffness matrix of a face-pair is a sum of dyadic products, see Eq.
+        :eq:`contact-stiffness`, which is evaluated by a single contraction.
+
+        ..  math::
+            :label: contact-stiffness
+
+            \boldsymbol{K} = \Phi''\ \boldsymbol{b} \otimes \boldsymbol{b}
+                - \Phi' \begin{bmatrix}
+                    \boldsymbol{B} \\ \boldsymbol{A}
+                \end{bmatrix}^T \begin{bmatrix}
+                    \boldsymbol{M} & \boldsymbol{H}^{-1} \\
+                    \boldsymbol{H}^{-1} & g\ \boldsymbol{H}^{-1}
+                \end{bmatrix} \begin{bmatrix}
+                    \boldsymbol{B} \\ \boldsymbol{A}
+                \end{bmatrix}
+        """
+
+        q, c = np.divmod(kinematics["point"], self.ncells)
+        dA = self.weight * self.dA[q, c]
+
+        b, A, B = self.variations(kinematics)
+
+        # the material part, given as a dyadic product of the left (V) and the right
+        # (W) vectors
+        V = np.concatenate(b)[None]
+        W = dA * hessian * V
+
+        if geometric:
+            gap = kinematics["gap"]
+            metric = kinematics["metric"]
+            curvature = kinematics["curvature"]
+
+            # inverse of the modified metric and the curvature-related fourth-order
+            # term. both the metric and the modified metric are positive definite, this
+            # is ensured by the contact search
+            inverse_H = inv(metric - gap * curvature)
+            M = dot(dot(inv(metric), curvature), inverse_H)
+
+            S = np.concatenate(
+                [
+                    np.concatenate([M, inverse_H], axis=1),
+                    np.concatenate([inverse_H, gap * inverse_H], axis=1),
+                ]
+            )
+
+            # the stacked variations of the face-pair
+            zeros = np.zeros((len(A), self.nvars, A.shape[-1]))
+            VG = np.concatenate(
+                [np.concatenate(B, axis=1), np.concatenate([zeros, A], axis=1)]
+            )
+            WG = -dA * gradient * np.einsum("JKp,Kip->Jip", S, VG)
+
+            V = np.concatenate([V, VG])
+            W = np.concatenate([W, WG])
+
+        return np.einsum("Jip,Jjp->ijp", V, W)
 
     def assemble_matrix(self, kinematics, gradient, hessian, geometric=True):
-        r"""Return the assembled sparse contact stiffness matrix.
+        r"""Return the assembled sparse contact stiffness matrix, see :meth:`matrix`.
 
         Parameters
         ----------
@@ -811,120 +1334,12 @@ class ContactSurfacePair:
         -------
         scipy.sparse.csr_matrix
             The assembled sparse contact stiffness matrix.
-
-        Notes
-        -----
-        The linearization of the variation of the gap is given in Eq.
-        :eq:`contact-linearization` with the modified metric
-        :math:`H_{\alpha\beta} = a_{\alpha\beta} - g\ \kappa_{\alpha\beta}` and
-        :math:`M^{\alpha\beta} = a^{\alpha\gamma} \kappa_{\gamma\delta} H^{\delta\beta}`
-        . The resulting stiffness matrix is symmetric.
-
-        ..  math::
-            :label: contact-linearization
-
-            \Delta \delta g = &-H^{\alpha\beta} \left(
-                A_\alpha \Delta B_\beta + B_\alpha \Delta A_\beta
-            \right)
-
-            &- g\ H^{\alpha\beta} A_\alpha \Delta A_\beta
-             - M^{\alpha\beta} B_\alpha \Delta B_\beta
         """
 
-        gap = kinematics["gap"]
-        metric = kinematics["metric"]
-        curvature = kinematics["curvature"]
+        values = self.matrix(kinematics, gradient, hessian, geometric=geometric)
+        pattern = sparsity_pattern(self.dofs(kinematics), self.ndof, self.dim)
 
-        q, c = np.divmod(kinematics["point"], self.ncells)
-        dA = self.weight * self.dA[q, c]
-
-        # inverse of the modified metric and the curvature-related fourth-order term.
-        # both the metric and the modified metric are positive definite, this is
-        # ensured by the contact search
-        inverse_metric = inv(metric)
-        inverse_H = inv(metric - gap * curvature)
-        M = dot(dot(inverse_metric, curvature), inverse_H)
-
-        b, A, B = self.variations(kinematics)
-
-        # material parts of the blocks of the stiffness matrix
-        Kss = hessian * dya(b[0], b[0], mode=1)
-        Ksm = hessian * dya(b[0], b[1], mode=1)
-        Kmm = hessian * dya(b[1], b[1], mode=1)
-
-        if geometric:
-            HA = dot(inverse_H, A)
-            MB = [dot(M, Bi) for Bi in B]
-
-            # geometric part of the secondary-secondary block
-            Kss -= gradient * np.einsum("Jip,Jjp->ijp", MB[0], B[0])
-
-            # geometric part of the secondary-primary coupling block
-            Ksm -= gradient * (
-                np.einsum("Jip,Jjp->ijp", B[0], HA)
-                + np.einsum("Jip,Jjp->ijp", MB[0], B[1])
-            )
-
-            # geometric part of the primary-primary block
-            T = np.einsum("Jip,Jjp->ijp", HA, B[1])
-            Kmm -= gradient * (
-                T
-                + transpose(T)
-                + gap * np.einsum("Jip,Jjp->ijp", HA, A)
-                + np.einsum("Jip,Jjp->ijp", MB[1], B[1])
-            )
-
-        rows, cols = self._indices(kinematics)
-        Ksm = self._assemble(dA * Ksm, rows, cols)
-
-        return (
-            self._assemble(dA * Kss, rows, rows)
-            + Ksm
-            + Ksm.T
-            + self._assemble(dA * Kmm, cols, cols)
-        )
-
-    def _assemble(self, values, rows, cols=None):
-        """Return a sparse vector or matrix, assembled from the dense sub-vectors or
-        sub-matrices of the face-pairs. The values are given in the array-layout of
-        FElupe, i.e. with the face-pairs on the trailing axis.
-
-        Parameters
-        ----------
-        values : ndarray of shape (..., npairs)
-            The dense sub-vectors or sub-matrices of the face-pairs.
-        rows : ndarray of shape (npairs, ...)
-            The row-indices of the degrees of freedom of the face-pairs.
-        cols : ndarray of shape (npairs, ...) or None, optional
-            The column-indices of the degrees of freedom of the face-pairs. If None, a
-            sparse vector is assembled (default is None).
-
-        Returns
-        -------
-        scipy.sparse.csr_matrix
-            The assembled sparse vector or matrix.
-        """
-
-        # move the axis of the face-pairs to the front, as it is done in the assembly
-        # of an integral form
-        values = np.moveaxis(values, -1, 0)
-
-        if cols is None:
-            return csr_matrix(
-                (values.ravel(), (rows.ravel(), np.zeros(rows.size, dtype=int))),
-                shape=(self.ndof, 1),
-            )
-
-        return csr_matrix(
-            (
-                values.ravel(),
-                (
-                    np.broadcast_to(rows[:, :, None], values.shape).ravel(),
-                    np.broadcast_to(cols[:, None, :], values.shape).ravel(),
-                ),
-            ),
-            shape=(self.ndof, self.ndof),
-        )
+        return sparse_matrix(values, pattern, self.dim)
 
 
 class SolidBodyContact:
@@ -933,19 +1348,26 @@ class SolidBodyContact:
 
     Parameters
     ----------
-    field : FieldContainer
-        A field container with a displacement field, created on a boundary region of
-        the secondary (slave) surface, e.g. on a
-        :class:`~felupe.RegionHexahedronBoundary` or on a
-        :class:`~felupe.RegionQuadBoundary`. The weak form of the contact is integrated
-        on the faces of this surface.
-    field_primary : FieldContainer
-        A field container with a displacement field, created on a boundary region of
-        the primary (master) surface. The integration points of the secondary surface
-        are projected on the faces of this surface.
+    field : SolidBody or FieldContainer
+        The solid body of the secondary (slave) surface, e.g. a
+        :class:`~felupe.SolidBody`, or a field container with a displacement field. The
+        weak form of the contact is integrated on the faces of this surface. For a solid
+        body (or a field container on the region of a solid body), the boundary region
+        of its region is created, which contains all faces on the outline of its mesh
+        (or the faces within ``mask``). A field container on a boundary region, e.g. on
+        a :class:`~felupe.RegionHexahedronBoundary` or on a
+        :class:`~felupe.RegionQuadBoundary`, is used as contact surface.
+    field_primary : SolidBody or FieldContainer or None, optional
+        The solid body of the primary (master) surface or a field container with a
+        displacement field, see ``field`` (default is None). The integration points of
+        the secondary surface are projected on the faces of this surface. If None, the
+        secondary surface (or the faces within ``mask_primary`` of the same solid body)
+        is used as primary surface, i.e. all bodies of the mesh are able to touch each
+        other.
     items : list of SolidBody or None, optional
         A list of items which are used to estimate the penalty stiffness (default is
-        None). If None, ``penalty`` must be given.
+        None). If None, the given solid bodies are used. If neither solid bodies nor
+        items are given, ``penalty`` must be given.
     penalty : float or None, optional
         The penalty stiffness :math:`\epsilon` as contact traction per unit penetration
         (default is None). If None, the penalty stiffness is estimated from the mean
@@ -992,10 +1414,21 @@ class SolidBodyContact:
     self_contact : bool, optional
         Flag to consider face-pairs which belong to the same body of the mesh (default
         is False). The bodies of a mesh are identified by their point-connectivity: two
-        faces belong to the same body if they are connected by a path of cells.
+        faces belong to the same body if they are connected by a path of cells. For
+        self-contact, ``max_distance`` must be smaller than the thickness of a body. A
+        warning is raised if integration points are in contact with their own body in
+        the undeformed configuration.
     geometric_stiffness : bool, optional
         Flag to add the geometric part of the contact stiffness matrix (default is
         True). This is required for a quadratic rate of convergence.
+    mask : ndarray of bool or None, optional
+        A mask of the points of the mesh of the secondary solid body (default is None).
+        Only the faces on the outline of the mesh with all their points in the mask are
+        used. If None, all faces on the outline are used. A mask requires a solid body
+        (or a field container on the region of a solid body).
+    mask_primary : ndarray of bool or None, optional
+        A mask of the points of the mesh of the primary solid body, see ``mask``
+        (default is None).
 
     Attributes
     ----------
@@ -1067,28 +1500,47 @@ class SolidBodyContact:
     outward unit normal vectors of both faces must be opposed, see ``facing``. Without
     these criteria, a face would detect another face of its own body, which is located
     on the opposite side of the body or around a corner, as a valid contact partner.
+    The bodies are identified by the cells of the given solid bodies or, for field
+    containers on boundary regions, by the cells of the boundary regions.
+
+    The contact search is designed for contact surfaces with all faces on the outline
+    of the meshes. It is carried out in three phases, see
+    :meth:`ContactSurfacePair.kinematics()
+    <felupe_contact._solidbody_contact.ContactSurfacePair.kinematics>`: a tree-query
+    on the centers of the faces of each body (broad phase), cheap and rigorous bounds
+    of the faces, which discard most of the candidate face-pairs, and the closest-point
+    projection of the remaining face-pairs (narrow phase). The face of the previous
+    evaluation is always a candidate of an integration point (hysteresis).
 
     All boundary regions of FElupe are supported: the faces of a boundary region of a
     three-dimensional mesh are (bi-) linear or quadratic quads and the faces of a
-    two-dimensional mesh are linear or quadratic lines (edges).
+    two-dimensional mesh are linear or quadratic lines (edges). For a solid body, the
+    boundary region is created for the region of its displacement field.
 
-    ..  list-table:: The faces of the boundary regions of FElupe
+    ..  list-table:: The regions, boundary regions and faces of FElupe
         :header-rows: 1
-        :widths: 70 30
+        :widths: 35 45 20
 
-        *   - Boundary region
+        *   - Region
+            - Boundary region
             - Face
-        *   - :class:`~felupe.RegionQuadBoundary`
+        *   - :class:`~felupe.RegionQuad`
+            - :class:`~felupe.RegionQuadBoundary`
             - ``line``
-        *   - :class:`~felupe.RegionQuadraticQuadBoundary`
+        *   - :class:`~felupe.RegionQuadraticQuad`
+            - :class:`~felupe.RegionQuadraticQuadBoundary`
             - ``line3``
-        *   - :class:`~felupe.RegionBiQuadraticQuadBoundary`
+        *   - :class:`~felupe.RegionBiQuadraticQuad`
+            - :class:`~felupe.RegionBiQuadraticQuadBoundary`
             - ``line3``
-        *   - :class:`~felupe.RegionHexahedronBoundary`
+        *   - :class:`~felupe.RegionHexahedron`
+            - :class:`~felupe.RegionHexahedronBoundary`
             - ``quad``
-        *   - :class:`~felupe.RegionQuadraticHexahedronBoundary`
+        *   - :class:`~felupe.RegionQuadraticHexahedron`
+            - :class:`~felupe.RegionQuadraticHexahedronBoundary`
             - ``quad8``
-        *   - :class:`~felupe.RegionTriQuadraticHexahedronBoundary`
+        *   - :class:`~felupe.RegionTriQuadraticHexahedron`
+            - :class:`~felupe.RegionTriQuadraticHexahedronBoundary`
             - ``quad9``
 
     In 2d, the out-of-plane behaviour is defined by the type of the displacement field:
@@ -1100,9 +1552,10 @@ class SolidBodyContact:
 
     ..  note::
 
-        The mesh of both boundary regions must be the same mesh as the mesh of the
-        region of the solid bodies. Two separate meshes are combined by
-        :meth:`MeshContainer.stack() <felupe.MeshContainer.stack>`.
+        The meshes of both contact surfaces must share the points with the mesh of the
+        global field container. Two separate meshes are combined by
+        :meth:`MeshContainer.stack() <felupe.MeshContainer.stack>` or by a
+        :class:`~felupe.MeshContainer` with ``merge=True``.
 
     ..  hint::
 
@@ -1161,24 +1614,13 @@ class SolidBodyContact:
         >>> field = fem.FieldContainer([fem.Field(region, dim=3)])
         >>> solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
 
-    The contact surfaces are created as boundary regions on the same mesh. Only the
-    faces on the outline of the mesh which are located in the region of interest are
-    used.
+    The contact surfaces are created on the outline of the mesh of the solid body. All
+    faces are used, i.e. all bodies of the mesh are able to touch each other.
 
     ..  pyvista-plot::
         :context:
 
-        >>> mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
-        >>> secondary = fem.FieldContainer(
-        ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
-        ... )
-        >>> primary = fem.FieldContainer(
-        ...     [fem.Field(
-        ...         fem.RegionHexahedronBoundary(mesh, mask=np.isclose(mesh.z, 1.0)),
-        ...         dim=3,
-        ...     )]
-        ... )
-        >>> contact = SolidBodyContact(secondary, primary, items=[solid])
+        >>> contact = SolidBodyContact(solid)
 
     The bottom face of the lower block is fixed and the top face of the upper block is
     moved downwards.
@@ -1200,13 +1642,14 @@ class SolidBodyContact:
         >>> job = fem.Job(steps=[step]).evaluate(verbose=0)
 
     The number of integration points which are in contact and the penalty stiffness,
-    which is estimated from the given items, are available in the contact object.
+    which is estimated from the solid body, are available in the contact object. Both
+    faces of the contact zone are used as secondary surfaces.
 
     ..  pyvista-plot::
         :context:
 
         >>> contact.results.npoints_in_contact
-        16
+        32
 
     ..  pyvista-plot::
         :context:
@@ -1214,10 +1657,41 @@ class SolidBodyContact:
 
         >>> solid.plot("Principal Values of Cauchy Stress").show()
 
-    An axisymmetric contact is created on the boundary regions of a two-dimensional
-    mesh, where the displacement fields are axisymmetric fields. The rotation axis is
-    the first axis of the mesh, i.e. a cylinder is placed on top of a bigger cylinder
-    if both blocks are stacked along the first axis.
+    The contact surfaces may be restricted to the region of interest by masks of the
+    points of the mesh. Here, the bottom face of the upper block is the secondary
+    surface and the top face of the lower block is the primary surface.
+
+    ..  pyvista-plot::
+        :context:
+
+        >>> contact = SolidBodyContact(
+        ...     solid,
+        ...     mask=np.logical_and(mesh.z > 1.0, mesh.z < 1.1),
+        ...     mask_primary=np.isclose(mesh.z, 1.0),
+        ... )
+
+    Alternatively, field containers on boundary regions are used as contact surfaces.
+    Then, the items for the estimation of the penalty stiffness must be given.
+
+    ..  pyvista-plot::
+        :context:
+
+        >>> mask = np.logical_and(mesh.z > 1.0, mesh.z < 1.1)
+        >>> secondary = fem.FieldContainer(
+        ...     [fem.Field(fem.RegionHexahedronBoundary(mesh, mask=mask), dim=3)]
+        ... )
+        >>> primary = fem.FieldContainer(
+        ...     [fem.Field(
+        ...         fem.RegionHexahedronBoundary(mesh, mask=np.isclose(mesh.z, 1.0)),
+        ...         dim=3,
+        ...     )]
+        ... )
+        >>> contact = SolidBodyContact(secondary, primary, items=[solid])
+
+    An axisymmetric contact is created on the boundary region of a two-dimensional
+    mesh, where the displacement field of the solid body is an axisymmetric field. The
+    rotation axis is the first axis of the mesh, i.e. a cylinder is placed on top of a
+    bigger cylinder if both blocks are stacked along the first axis.
 
     ..  pyvista-plot::
         :context:
@@ -1231,12 +1705,9 @@ class SolidBodyContact:
         ... )
         >>> solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
         >>>
-        >>> surface = fem.FieldContainer(
-        ...     [fem.FieldAxisymmetric(fem.RegionQuadBoundary(mesh), dim=2)]
-        ... )
-        >>> contact = SolidBodyContact(surface, surface, items=[solid])
-        >>> contact.results.npoints_in_contact
-        0
+        >>> contact = SolidBodyContact(solid)
+        >>> type(contact.field[0]).__name__
+        'FieldAxisymmetric'
 
     See Also
     --------
@@ -1248,7 +1719,7 @@ class SolidBodyContact:
     def __init__(
         self,
         field,
-        field_primary,
+        field_primary=None,
         items=None,
         penalty=None,
         penalty_scale=10.0,
@@ -1260,7 +1731,26 @@ class SolidBodyContact:
         facing=0.1,
         self_contact=False,
         geometric_stiffness=True,
+        mask=None,
+        mask_primary=None,
     ):
+        bodies = [field] if field_primary is None else [field, field_primary]
+
+        # the contact surfaces, i.e. field containers on boundary regions. for a solid
+        # body, the boundary region is created on its region
+        field, cells = contact_surface(bodies[0], mask=mask)
+        field_primary, cells_primary = field, cells
+
+        if len(bodies) > 1 or mask_primary is not None:
+            field_primary, cells_primary = contact_surface(
+                bodies[-1], mask=mask_primary
+            )
+
+        # the given solid bodies are used to estimate the penalty stiffness
+        if items is None:
+            solids = [b for b in bodies if not isinstance(b, FieldContainer)]
+            items = list({id(solid): solid for solid in solids}.values()) or None
+
         self.field = field
         self.field_primary = field_primary
         self.items = items
@@ -1275,14 +1765,24 @@ class SolidBodyContact:
         self.geometric_stiffness = geometric_stiffness
 
         if items is None and penalty is None:
-            raise ValueError("Either `items` or `penalty` must be given.")
+            raise ValueError(
+                "Either solid bodies, `items` or `penalty` must be given to estimate "
+                "the penalty stiffness."
+            )
 
-        self.pairs = [ContactSurfacePair(field, field_primary)]
+        # the cells of the solid bodies identify the connected bodies of the mesh. the
+        # cells of a boundary region are used if no solid body is given
+        cells = [
+            surface[0].region.mesh.cells if c is None else c
+            for surface, c in [(field, cells), (field_primary, cells_primary)]
+        ]
+
+        self.pairs = [ContactSurfacePair(field, field_primary, cells=cells)]
 
         if two_pass:
             self.pairs = [
-                ContactSurfacePair(field, field_primary, weight=0.5),
-                ContactSurfacePair(field_primary, field, weight=0.5),
+                ContactSurfacePair(field, field_primary, weight=0.5, cells=cells),
+                ContactSurfacePair(field_primary, field, weight=0.5, cells=cells),
             ]
 
         self.size = self.pairs[0].size
@@ -1305,6 +1805,9 @@ class SolidBodyContact:
         if max_distance is None:
             self.max_distance = 5 * self.size
 
+        if self_contact:
+            self._check_self_contact()
+
         self.assemble = Assemble(vector=self._vector, matrix=self._matrix)
         self.results = Results()
         self.results.gap = []
@@ -1313,6 +1816,7 @@ class SolidBodyContact:
 
         self._kinematics = None
         self._values = None
+        self._pattern = None
 
     def __repr__(self):
         header = "<felupe SolidBodyContact object>"
@@ -1321,6 +1825,32 @@ class SolidBodyContact:
         contact = f"  Integration points in contact: {self.results.npoints_in_contact}"
 
         return "\n".join([header, penalty, smoothing, contact])
+
+    def _check_self_contact(self):
+        """Warn if integration points are in contact with their own body in the
+        undeformed configuration, i.e. if the maximum distance of the contact search
+        exceeds the thickness of a body."""
+
+        pair = self.pairs[0]
+        kinematics = pair.kinematics(
+            x=pair.field.region.mesh.points,
+            max_distance=self.max_distance,
+            candidates=self.candidates,
+            tolerance=self.tolerance,
+            facing=self.facing,
+            self_contact=True,
+        )
+        pair.face[:] = -1
+
+        if kinematics is not None:
+            depth = -kinematics["gap"].min()
+            warnings.warn(
+                f"{len(kinematics['gap'])} integration points are in self-contact in "
+                f"the undeformed configuration (maximum penetration {depth:.3g}). The "
+                f"maximum distance of the contact search ({self.max_distance:.3g}) "
+                "probably exceeds the thickness of a body, i.e. the opposite faces of a "
+                "body are detected as penetrated ones. Decrease `max_distance`."
+            )
 
     def checkpoint(self):
         """Return a checkpoint of the state of the contact search.
@@ -1513,17 +2043,24 @@ class SolidBodyContact:
         return self._kinematics
 
     def _vector(self, field=None, parallel=False, resize=None):
-        "Assemble the sparse contact force vector."
+        """Assemble the sparse contact force vector. The vectors of the face-pairs of
+        all surface pairs are summed up at once."""
 
         kinematics = self._extract(field=field, parallel=parallel)
-        force = csr_matrix((self.pairs[0].ndof, 1))
+        ndof = self.pairs[0].ndof
 
+        values, dofs = [], []
         for pair, kin in zip(self.pairs, kinematics):
-            if kin is None:
-                continue
+            if kin is not None:
+                values.append(pair.vector(kin, -self.pressure(kin["gap"])[0]))
+                dofs.append(pair.dofs(kin))
 
-            pressure = self.pressure(kin["gap"])[0]
-            force += pair.assemble_vector(kin, -pressure)
+        if values:
+            force = sparse_vector(
+                np.concatenate(values, axis=-1), np.concatenate(dofs), size=ndof
+            )
+        else:
+            force = csr_matrix((ndof, 1))
 
         if resize is not None:
             force.resize(*resize.shape)
@@ -1533,23 +2070,37 @@ class SolidBodyContact:
         return force
 
     def _matrix(self, field=None, parallel=False, resize=None):
-        "Assemble the sparse contact stiffness matrix."
+        """Assemble the sparse contact stiffness matrix. The matrices of the face-pairs
+        of all surface pairs are summed up at once by a sparsity pattern, which is
+        re-used as long as the face-pairs in contact don't change."""
 
         kinematics = self._extract(field=field, parallel=parallel)
         ndof = self.pairs[0].ndof
-        stiffness = csr_matrix((ndof, ndof))
 
+        values, dofs = [], []
         for pair, kin in zip(self.pairs, kinematics):
-            if kin is None:
-                continue
+            if kin is not None:
+                pressure, dpressure = self.pressure(kin["gap"])
+                values.append(
+                    pair.matrix(
+                        kin, -pressure, -dpressure, geometric=self.geometric_stiffness
+                    )
+                )
+                dofs.append(pair.dofs(kin))
 
-            pressure, dpressure = self.pressure(kin["gap"])
-            stiffness += pair.assemble_matrix(
-                kin,
-                -pressure,
-                -dpressure,
-                geometric=self.geometric_stiffness,
+        if values:
+            dofs = np.concatenate(dofs)
+
+            # the face-pairs in contact are often unchanged between the iterations of
+            # the Newton-Raphson method, then the sparsity pattern is re-used
+            if self._pattern is None or not np.array_equal(self._pattern[0], dofs):
+                self._pattern = (dofs, sparsity_pattern(dofs, ndof, self.pairs[0].dim))
+
+            stiffness = sparse_matrix(
+                np.concatenate(values, axis=-1), self._pattern[1], self.pairs[0].dim
             )
+        else:
+            stiffness = csr_matrix((ndof, ndof))
 
         if resize is not None:
             stiffness.resize(*resize.shape)
