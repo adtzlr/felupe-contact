@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 - Added `SolidBodyContact`.
+- Added the methods `SolidBodyContact.checkpoint()` and `SolidBodyContact.restore()`,
+  which are used by the `CutbackPlugin` of FElupe (v11.2.0 and later). The faces of the
+  primary surface, to which the integration points of the secondary surface are
+  assigned, are modified by the iterations of the Newton-Raphson method (hysteresis of
+  the contact search). On a cutback, the faces of the last converged increment are
+  restored, i.e. the next attempt doesn't start with the faces of the failed attempt.
+  The cached kinematics and the assembled force vector and stiffness matrix are reset.
+- Added tests which check that `SolidBodyContact` is an item of FElupe
+  (`felupe.mechanics.Item`, v11.3.0 and later) and that a large increment, which fails
+  without a cutback, is solved with the `CutbackPlugin` and with the `LinesearchPlugin`.
 - Added support for two-dimensional problems in `SolidBodyContact`, i.e. for plane
   strain and axisymmetric problems. The faces of a boundary region of a two-dimensional
   mesh are its edges, hence a face is spanned by one instead of two natural element
@@ -72,7 +82,15 @@ All notable changes to this project will be documented in this file. The format 
 - Fixed the reference to `SolidBodyContact` in its docstring-example, which was given as
   `fem.SolidBodyContact`. The class is imported from `felupe_contact`.
 - Fixed the *See Also*-reference of `SolidBodyContact`, which pointed to the
-  non-existent `felupe.ContactRigidPlane`. It now refers to `felupe.MultiPointContact`.
+  non-existent `felupe.ContactRigidPlane`. It now refers to `felupe.MultiPointContact`
+  and to `felupe.ContactRigidPlane` and `felupe.ContactRigidCylinder`, which are
+  available since FElupe v11.0.0 and v11.2.0.
+- Fixed the faces of the primary surface, which are assigned to the integration points
+  of the secondary surface for the next evaluation (hysteresis of the contact search),
+  if no integration point is in contact. They were kept from the evaluation before,
+  i.e. after a complete loss of contact, an integration point got the face of an
+  outdated evaluation. Now, no face is assigned, like for the integration points which
+  are not in contact if other integration points are in contact.
 
 ### Changed
 - Changed the assembly of the block of the contact stiffness matrix and of the part of

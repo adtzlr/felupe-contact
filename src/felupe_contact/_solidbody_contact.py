@@ -523,7 +523,10 @@ class ContactSurfacePair:
         point = np.concatenate(point) if point else empty
         face = np.concatenate(face) if face else empty
 
+        # no integration point is in contact, i.e. no face is assigned for the next
+        # evaluation (like for the integration points which are not in contact below)
         if len(point) == 0:
+            self.face[:] = -1
             return None
 
         # narrow-phase contact search: closest-point projection
@@ -592,6 +595,7 @@ class ContactSurfacePair:
         )
 
         if not np.any(valid):
+            self.face[:] = -1
             return None
 
         # if an integration point is projected on more than one face, then the closest
@@ -1124,6 +1128,17 @@ class SolidBodyContact:
         is stiffer for quadratic cells. Decrease ``penalty_scale`` or use smaller load
         increments if the Newton-Raphson method does not converge.
 
+    ..  hint::
+
+        The contact is an item of FElupe, see :class:`felupe.mechanics.Item`, i.e. it
+        is used with the plugins of a :class:`~felupe.Job`. Instead of decreasing the
+        load increments of all substeps, add a :class:`~felupe.CutbackPlugin`, which
+        subdivides only the substeps which fail to converge, and optionally a
+        :class:`~felupe.LinesearchPlugin`, e.g. ``fem.Job(steps,
+        plugins=[fem.CutbackPlugin(), fem.LinesearchPlugin()])``. The state of the
+        contact search is restored on a cutback by :meth:`checkpoint` and
+        :meth:`restore`.
+
     Examples
     --------
     A rubber block is pressed on a (stiffer) block. Both blocks are meshed
@@ -1225,6 +1240,8 @@ class SolidBodyContact:
 
     See Also
     --------
+    felupe.ContactRigidPlane : A node-to-surface contact with a rigid plane.
+    felupe.ContactRigidCylinder : A node-to-surface contact with a rigid cylinder.
     felupe.MultiPointContact : A frictionless point-to-rigid (wall) contact.
     """
 
@@ -1304,6 +1321,72 @@ class SolidBodyContact:
         contact = f"  Integration points in contact: {self.results.npoints_in_contact}"
 
         return "\n".join([header, penalty, smoothing, contact])
+
+    def checkpoint(self):
+        """Return a checkpoint of the state of the contact search.
+
+        Returns
+        -------
+        dict
+            A dict with copies of the faces of the primary surface, to which the
+            integration points of the secondary surface are assigned by the last
+            evaluation (for each surface pair), and of the results of the contact, i.e.
+            the gaps, the contact pressures and the number of integration points in
+            contact.
+
+        Notes
+        -----
+        The assigned faces of the last evaluation are used by the contact search of the
+        next evaluation: an integration point is kept on its face as long as its
+        projection is located inside this face (hysteresis). This state is modified by
+        the iterations of the Newton-Raphson method. On a cutback of the
+        :class:`~felupe.CutbackPlugin`, the checkpoint of the last converged increment
+        is restored, i.e. the contact search of the next attempt doesn't start with the
+        faces of the failed attempt.
+
+        The penalty stiffness is not included in the checkpoint, i.e. an estimated
+        penalty stiffness is kept constant.
+
+        See Also
+        --------
+        felupe.CutbackPlugin : A cutback of the increment of failed substeps.
+        """
+
+        return {
+            "faces": [pair.face.copy() for pair in self.pairs],
+            "gap": list(self.results.gap),
+            "pressure": list(self.results.pressure),
+            "npoints_in_contact": self.results.npoints_in_contact,
+        }
+
+    def restore(self, checkpoint):
+        """Restore a checkpoint of the state of the contact search inplace.
+
+        Parameters
+        ----------
+        checkpoint : dict
+            A dict with the checkpoint of the state of the contact search, see
+            :meth:`checkpoint`.
+
+        Notes
+        -----
+        The cached contact kinematics, the assembled force vector and the assembled
+        stiffness matrix belong to the evaluation before the restore and are reset, i.e.
+        the contact kinematics are re-evaluated on the next assembly.
+        """
+
+        for pair, face in zip(self.pairs, checkpoint["faces"]):
+            pair.face[:] = face
+
+        self.results.gap = list(checkpoint["gap"])
+        self.results.pressure = list(checkpoint["pressure"])
+        self.results.npoints_in_contact = checkpoint["npoints_in_contact"]
+
+        self.results.force = None
+        self.results.stiffness = None
+
+        self._kinematics = None
+        self._values = None
 
     def pressure(self, gap):
         r"""Return the contact pressure and its derivative w.r.t. the gap, evaluated by

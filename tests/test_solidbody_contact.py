@@ -49,7 +49,7 @@ def surfaces(mesh, masked):
     )
 
 
-def compress(mesh, field, solid, contact, move=-0.3, num=3):
+def compress(mesh, field, solid, contact, move=-0.3, num=3, plugins=None):
     "Move the top face of the upper block downwards and return the solved job."
 
     boundaries = {
@@ -63,10 +63,10 @@ def compress(mesh, field, solid, contact, move=-0.3, num=3):
         boundaries=boundaries,
     )
 
-    return fem.Job(steps=[step]).evaluate(verbose=0)
+    return fem.Job(steps=[step], plugins=plugins or []).evaluate(verbose=0)
 
 
-def solve(masked, move=-0.3, num=3, **kwargs):
+def solve(masked, move=-0.3, num=3, plugins=None, **kwargs):
     "Compress the two blocks and return the contact and the displacements."
 
     mesh = two_blocks()
@@ -74,7 +74,7 @@ def solve(masked, move=-0.3, num=3, **kwargs):
     secondary, primary = surfaces(mesh, masked=masked)
 
     contact = SolidBodyContact(secondary, primary, items=[solid], **kwargs)
-    compress(mesh, field, solid, contact, move=move, num=num)
+    compress(mesh, field, solid, contact, move=move, num=num, plugins=plugins)
 
     return contact, field[0].values
 
@@ -473,3 +473,84 @@ def test_estimated_penalty_with_a_multiplier():
 
     assert pressure.assemble.multiplier is not None
     assert contact.update_penalty() > 0
+
+
+def test_is_an_item():
+    "The contact fulfils the interface of an item of FElupe."
+
+    mesh = two_blocks()
+    field, solid = solid_body(mesh)
+    contact = SolidBodyContact(*surfaces(mesh, masked=True), items=[solid])
+
+    assert isinstance(contact, fem.mechanics.Item)
+
+
+@pytest.mark.parametrize("two_pass", [False, True])
+def test_checkpoint_and_restore(two_pass):
+    "A restore resets the assigned faces, the results and the cached kinematics."
+
+    mesh = two_blocks()
+    field, solid = solid_body(mesh)
+    contact = SolidBodyContact(
+        *surfaces(mesh, masked=True), items=[solid], two_pass=two_pass
+    )
+    compress(mesh, field, solid, contact, move=-0.1, num=1)
+
+    checkpoint = contact.checkpoint()
+    faces = [pair.face.copy() for pair in contact.pairs]
+    gap = contact.results.gap
+    npoints = contact.results.npoints_in_contact
+
+    assert npoints > 0
+
+    # the blocks are separated in the undeformed configuration
+    contact.field[0].values = np.zeros_like(contact.field[0].values)
+    contact.assemble.vector()
+
+    assert contact.results.npoints_in_contact == 0
+    assert all(np.all(pair.face == -1) for pair in contact.pairs)
+
+    contact.restore(checkpoint)
+
+    for pair, face in zip(contact.pairs, faces):
+        np.testing.assert_array_equal(pair.face, face)
+
+    for restored, g in zip(contact.results.gap, gap):
+        np.testing.assert_array_equal(restored, g)
+
+    assert contact.results.npoints_in_contact == npoints
+    assert contact.results.force is None
+    assert contact.results.stiffness is None
+
+    # the kinematics are re-evaluated and the checkpoint is not modified by them
+    contact.assemble.vector()
+
+    assert contact.results.npoints_in_contact == 0
+    for face, checkpoint_face in zip(faces, checkpoint["faces"]):
+        np.testing.assert_array_equal(checkpoint_face, face)
+
+
+@pytest.mark.parametrize("linesearch", [False, True])
+def test_cutback(monkeypatch, linesearch):
+    "A large increment is recovered by the plugins of FElupe."
+
+    restored = []
+    restore = SolidBodyContact.restore
+
+    def spy(self, checkpoint):
+        restored.append(checkpoint)
+        return restore(self, checkpoint)
+
+    monkeypatch.setattr(SolidBodyContact, "restore", spy)
+
+    cutback = fem.CutbackPlugin()
+    plugins = [cutback, fem.LinesearchPlugin()] if linesearch else [cutback]
+    contact, values = solve(masked=True, move=-0.45, num=1, plugins=plugins)
+
+    assert contact.results.npoints_in_contact > 0
+    assert np.isclose(values[:, 2].min(), -0.45)
+
+    # without the line search, the increment fails and the contact is restored
+    if not linesearch:
+        assert sum(cutback.cutbacks) > 0
+        assert len(restored) == sum(cutback.cutbacks)
