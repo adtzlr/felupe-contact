@@ -2,9 +2,11 @@
 
 import warnings
 from functools import cached_property
+from types import SimpleNamespace
 
 import numpy as np
 from felupe import Field, FieldAxisymmetric, FieldContainer, FieldPlaneStrain
+from felupe.assembly._sparsity import SparsityPattern
 from felupe.math import cross, det, dot, dya, inv, norm, transpose
 from felupe.mechanics import Assemble, Results
 from scipy.sparse import coo_matrix, csr_matrix
@@ -87,6 +89,99 @@ def connected_bodies(cells, npoints):
     )
 
     return connected_components(graph, directed=False, return_labels=True)[1]
+
+
+def sparse_vector(values, dofs, size):
+    """Return a sparse vector, assembled from the vectors of the face-pairs.
+
+    Parameters
+    ----------
+    values : ndarray of shape (n, npairs)
+        The vectors of the face-pairs.
+    dofs : ndarray of shape (npairs, n)
+        The degrees of freedom of the face-pairs.
+    size : int
+        The size of the vector.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The sparse vector of shape (size, 1).
+
+    Notes
+    -----
+    The values are summed up into a dense array by :func:`numpy.bincount`, like the
+    values of an integral form are summed up into the data array of a sparsity pattern
+    by FElupe. This replaces the conversion of all (duplicate) values from the
+    coordinate (COO) to the CSR format.
+    """
+
+    vector = np.bincount(dofs.T.ravel(), weights=values.ravel(), minlength=size)
+
+    return csr_matrix(vector.reshape(-1, 1))
+
+
+def sparsity_pattern(dofs, size, dim):
+    """Return the sparsity pattern of the stiffness matrices of the face-pairs.
+
+    Parameters
+    ----------
+    dofs : ndarray of shape (npairs, n)
+        The degrees of freedom of the face-pairs, numbered point-wise (``dof = point *
+        dim + i``).
+    size : int
+        The number of rows and columns of the matrix.
+    dim : int
+        The number of the components per point.
+
+    Returns
+    -------
+    felupe.assembly._sparsity.SparsityPattern
+        The sparsity pattern of FElupe.
+
+    Notes
+    -----
+    The sparsity pattern of FElupe is created for a test and a trial field. Here, the
+    face-pairs are the cells and their degrees of freedom are passed like the indices
+    ``cai`` of a field, i.e. of shape ``(cell, a, i)`` with the points ``a`` of both
+    faces of a face-pair.
+    """
+
+    indices = SimpleNamespace(cai=dofs.reshape(len(dofs), -1, dim), shape=(size,))
+    field = SimpleNamespace(indices=indices)
+
+    return SparsityPattern(field, field)
+
+
+def sparse_matrix(values, pattern, dim):
+    """Return a sparse matrix, assembled from the stiffness matrices of the face-pairs
+    by a sparsity pattern of FElupe.
+
+    Parameters
+    ----------
+    values : ndarray of shape (n, n, npairs)
+        The stiffness matrices of the face-pairs.
+    pattern : felupe.assembly._sparsity.SparsityPattern
+        The sparsity pattern of the face-pairs, see :func:`sparsity_pattern`.
+    dim : int
+        The number of the components per point.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The sparse matrix.
+
+    Notes
+    -----
+    The values are summed up into the data array of the CSR format by
+    :func:`numpy.bincount`. This is about twice as fast as the conversion of all
+    (duplicate) values from the coordinate (COO) to the CSR format, see the sparsity
+    pattern of FElupe.
+    """
+
+    n, npairs = values.shape[1:]
+
+    return pattern.assemble(values.reshape(n // dim, dim, n // dim, dim, npairs))
 
 
 def closest_point_projection(points, vertices, element, maxiter=12, tol=1e-10):
@@ -1033,20 +1128,36 @@ class ContactSurfacePair:
 
         return b, A, B
 
-    def _indices(self, kinematics):
-        "Return the row- and column-indices of the dofs of the face-pairs."
+    def dofs(self, kinematics):
+        """Return the degrees of freedom of the face-pairs, i.e. the components of the
+        displacements of the points of the face of the secondary surface followed by
+        those of the face of the primary surface.
+
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+
+        Returns
+        -------
+        ndarray of shape (npairs, nvars + nvars_primary)
+            The degrees of freedom of the face-pairs.
+        """
 
         cell = kinematics["point"] % self.ncells
 
-        return (
-            self.dof[self.cells_faces[cell]].reshape(-1, self.nvars),
-            self.dof[self.cells_faces_primary[kinematics["face"]]].reshape(
-                -1, self.nvars_primary
-            ),
+        return np.concatenate(
+            [
+                self.dof[self.cells_faces[cell]].reshape(-1, self.nvars),
+                self.dof[self.cells_faces_primary[kinematics["face"]]].reshape(
+                    -1, self.nvars_primary
+                ),
+            ],
+            axis=1,
         )
 
-    def assemble_vector(self, kinematics, gradient):
-        r"""Return the assembled sparse contact force vector.
+    def vector(self, kinematics, gradient):
+        r"""Return the contact force vectors of the face-pairs.
 
         Parameters
         ----------
@@ -1058,8 +1169,9 @@ class ContactSurfacePair:
 
         Returns
         -------
-        scipy.sparse.csr_matrix
-            The assembled sparse contact force vector.
+        ndarray of shape (nvars + nvars_primary, npairs)
+            The contact force vectors of the face-pairs, given for the degrees of
+            freedom of :meth:`dofs`.
 
         Notes
         -----
@@ -1078,15 +1190,131 @@ class ContactSurfacePair:
         q, c = np.divmod(kinematics["point"], self.ncells)
         dA = self.weight * self.dA[q, c] * gradient
 
-        force = csr_matrix((self.ndof, 1))
+        return dA * np.concatenate(self.variations_gap(kinematics))
 
-        for b, rows in zip(self.variations_gap(kinematics), self._indices(kinematics)):
-            force += self._assemble(dA * b, rows)
+    def assemble_vector(self, kinematics, gradient):
+        r"""Return the assembled sparse contact force vector, see :meth:`vector`.
 
-        return force
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+        gradient : ndarray of shape (npairs,)
+            The first derivative :math:`\Phi'(g)` of the contact potential w.r.t. the
+            gap, i.e. the negative contact pressure.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            The assembled sparse contact force vector.
+        """
+
+        values = self.vector(kinematics, gradient)
+
+        return sparse_vector(values, self.dofs(kinematics), size=self.ndof)
+
+    def matrix(self, kinematics, gradient, hessian, geometric=True):
+        r"""Return the contact stiffness matrices of the face-pairs.
+
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+        gradient : ndarray of shape (npairs,)
+            The first derivative :math:`\Phi'(g)` of the contact potential w.r.t. the
+            gap, i.e. the negative contact pressure.
+        hessian : ndarray of shape (npairs,)
+            The second derivative :math:`\Phi''(g)` of the contact potential w.r.t. the
+            gap.
+        geometric : bool, optional
+            Flag to add the geometric part of the contact stiffness matrix (default is
+            True).
+
+        Returns
+        -------
+        ndarray of shape (nvars + nvars_primary, nvars + nvars_primary, npairs)
+            The contact stiffness matrices of the face-pairs, given for the degrees of
+            freedom of :meth:`dofs`.
+
+        Notes
+        -----
+        The linearization of the variation of the gap is given in Eq.
+        :eq:`contact-linearization` with the modified metric
+        :math:`H_{\alpha\beta} = a_{\alpha\beta} - g\ \kappa_{\alpha\beta}` and
+        :math:`M^{\alpha\beta} = a^{\alpha\gamma} \kappa_{\gamma\delta} H^{\delta\beta}`
+        . The resulting stiffness matrix is symmetric.
+
+        ..  math::
+            :label: contact-linearization
+
+            \Delta \delta g = &-H^{\alpha\beta} \left(
+                A_\alpha \Delta B_\beta + B_\alpha \Delta A_\beta
+            \right)
+
+            &- g\ H^{\alpha\beta} A_\alpha \Delta A_\beta
+             - M^{\alpha\beta} B_\alpha \Delta B_\beta
+
+        The variations of both faces of a face-pair are stacked, where the variation
+        :math:`A_\alpha` is zero for the face of the secondary surface. Then, the
+        stiffness matrix of a face-pair is a sum of dyadic products, see Eq.
+        :eq:`contact-stiffness`, which is evaluated by a single contraction.
+
+        ..  math::
+            :label: contact-stiffness
+
+            \boldsymbol{K} = \Phi''\ \boldsymbol{b} \otimes \boldsymbol{b}
+                - \Phi' \begin{bmatrix}
+                    \boldsymbol{B} \\ \boldsymbol{A}
+                \end{bmatrix}^T \begin{bmatrix}
+                    \boldsymbol{M} & \boldsymbol{H}^{-1} \\
+                    \boldsymbol{H}^{-1} & g\ \boldsymbol{H}^{-1}
+                \end{bmatrix} \begin{bmatrix}
+                    \boldsymbol{B} \\ \boldsymbol{A}
+                \end{bmatrix}
+        """
+
+        q, c = np.divmod(kinematics["point"], self.ncells)
+        dA = self.weight * self.dA[q, c]
+
+        b, A, B = self.variations(kinematics)
+
+        # the material part, given as a dyadic product of the left (V) and the right
+        # (W) vectors
+        V = np.concatenate(b)[None]
+        W = dA * hessian * V
+
+        if geometric:
+            gap = kinematics["gap"]
+            metric = kinematics["metric"]
+            curvature = kinematics["curvature"]
+
+            # inverse of the modified metric and the curvature-related fourth-order
+            # term. both the metric and the modified metric are positive definite, this
+            # is ensured by the contact search
+            inverse_H = inv(metric - gap * curvature)
+            M = dot(dot(inv(metric), curvature), inverse_H)
+
+            S = np.concatenate(
+                [
+                    np.concatenate([M, inverse_H], axis=1),
+                    np.concatenate([inverse_H, gap * inverse_H], axis=1),
+                ]
+            )
+
+            # the stacked variations of the face-pair
+            zeros = np.zeros((len(A), self.nvars, A.shape[-1]))
+            VG = np.concatenate(
+                [np.concatenate(B, axis=1), np.concatenate([zeros, A], axis=1)]
+            )
+            WG = -dA * gradient * np.einsum("JKp,Kip->Jip", S, VG)
+
+            V = np.concatenate([V, VG])
+            W = np.concatenate([W, WG])
+
+        return np.einsum("Jip,Jjp->ijp", V, W)
 
     def assemble_matrix(self, kinematics, gradient, hessian, geometric=True):
-        r"""Return the assembled sparse contact stiffness matrix.
+        r"""Return the assembled sparse contact stiffness matrix, see :meth:`matrix`.
 
         Parameters
         ----------
@@ -1106,120 +1334,12 @@ class ContactSurfacePair:
         -------
         scipy.sparse.csr_matrix
             The assembled sparse contact stiffness matrix.
-
-        Notes
-        -----
-        The linearization of the variation of the gap is given in Eq.
-        :eq:`contact-linearization` with the modified metric
-        :math:`H_{\alpha\beta} = a_{\alpha\beta} - g\ \kappa_{\alpha\beta}` and
-        :math:`M^{\alpha\beta} = a^{\alpha\gamma} \kappa_{\gamma\delta} H^{\delta\beta}`
-        . The resulting stiffness matrix is symmetric.
-
-        ..  math::
-            :label: contact-linearization
-
-            \Delta \delta g = &-H^{\alpha\beta} \left(
-                A_\alpha \Delta B_\beta + B_\alpha \Delta A_\beta
-            \right)
-
-            &- g\ H^{\alpha\beta} A_\alpha \Delta A_\beta
-             - M^{\alpha\beta} B_\alpha \Delta B_\beta
         """
 
-        gap = kinematics["gap"]
-        metric = kinematics["metric"]
-        curvature = kinematics["curvature"]
+        values = self.matrix(kinematics, gradient, hessian, geometric=geometric)
+        pattern = sparsity_pattern(self.dofs(kinematics), self.ndof, self.dim)
 
-        q, c = np.divmod(kinematics["point"], self.ncells)
-        dA = self.weight * self.dA[q, c]
-
-        # inverse of the modified metric and the curvature-related fourth-order term.
-        # both the metric and the modified metric are positive definite, this is
-        # ensured by the contact search
-        inverse_metric = inv(metric)
-        inverse_H = inv(metric - gap * curvature)
-        M = dot(dot(inverse_metric, curvature), inverse_H)
-
-        b, A, B = self.variations(kinematics)
-
-        # material parts of the blocks of the stiffness matrix
-        Kss = hessian * dya(b[0], b[0], mode=1)
-        Ksm = hessian * dya(b[0], b[1], mode=1)
-        Kmm = hessian * dya(b[1], b[1], mode=1)
-
-        if geometric:
-            HA = dot(inverse_H, A)
-            MB = [dot(M, Bi) for Bi in B]
-
-            # geometric part of the secondary-secondary block
-            Kss -= gradient * np.einsum("Jip,Jjp->ijp", MB[0], B[0])
-
-            # geometric part of the secondary-primary coupling block
-            Ksm -= gradient * (
-                np.einsum("Jip,Jjp->ijp", B[0], HA)
-                + np.einsum("Jip,Jjp->ijp", MB[0], B[1])
-            )
-
-            # geometric part of the primary-primary block
-            T = np.einsum("Jip,Jjp->ijp", HA, B[1])
-            Kmm -= gradient * (
-                T
-                + transpose(T)
-                + gap * np.einsum("Jip,Jjp->ijp", HA, A)
-                + np.einsum("Jip,Jjp->ijp", MB[1], B[1])
-            )
-
-        rows, cols = self._indices(kinematics)
-        Ksm = self._assemble(dA * Ksm, rows, cols)
-
-        return (
-            self._assemble(dA * Kss, rows, rows)
-            + Ksm
-            + Ksm.T
-            + self._assemble(dA * Kmm, cols, cols)
-        )
-
-    def _assemble(self, values, rows, cols=None):
-        """Return a sparse vector or matrix, assembled from the dense sub-vectors or
-        sub-matrices of the face-pairs. The values are given in the array-layout of
-        FElupe, i.e. with the face-pairs on the trailing axis.
-
-        Parameters
-        ----------
-        values : ndarray of shape (..., npairs)
-            The dense sub-vectors or sub-matrices of the face-pairs.
-        rows : ndarray of shape (npairs, ...)
-            The row-indices of the degrees of freedom of the face-pairs.
-        cols : ndarray of shape (npairs, ...) or None, optional
-            The column-indices of the degrees of freedom of the face-pairs. If None, a
-            sparse vector is assembled (default is None).
-
-        Returns
-        -------
-        scipy.sparse.csr_matrix
-            The assembled sparse vector or matrix.
-        """
-
-        # move the axis of the face-pairs to the front, as it is done in the assembly
-        # of an integral form
-        values = np.moveaxis(values, -1, 0)
-
-        if cols is None:
-            return csr_matrix(
-                (values.ravel(), (rows.ravel(), np.zeros(rows.size, dtype=int))),
-                shape=(self.ndof, 1),
-            )
-
-        return csr_matrix(
-            (
-                values.ravel(),
-                (
-                    np.broadcast_to(rows[:, :, None], values.shape).ravel(),
-                    np.broadcast_to(cols[:, None, :], values.shape).ravel(),
-                ),
-            ),
-            shape=(self.ndof, self.ndof),
-        )
+        return sparse_matrix(values, pattern, self.dim)
 
 
 class SolidBodyContact:
@@ -1696,6 +1816,7 @@ class SolidBodyContact:
 
         self._kinematics = None
         self._values = None
+        self._pattern = None
 
     def __repr__(self):
         header = "<felupe SolidBodyContact object>"
@@ -1922,17 +2043,24 @@ class SolidBodyContact:
         return self._kinematics
 
     def _vector(self, field=None, parallel=False, resize=None):
-        "Assemble the sparse contact force vector."
+        """Assemble the sparse contact force vector. The vectors of the face-pairs of
+        all surface pairs are summed up at once."""
 
         kinematics = self._extract(field=field, parallel=parallel)
-        force = csr_matrix((self.pairs[0].ndof, 1))
+        ndof = self.pairs[0].ndof
 
+        values, dofs = [], []
         for pair, kin in zip(self.pairs, kinematics):
-            if kin is None:
-                continue
+            if kin is not None:
+                values.append(pair.vector(kin, -self.pressure(kin["gap"])[0]))
+                dofs.append(pair.dofs(kin))
 
-            pressure = self.pressure(kin["gap"])[0]
-            force += pair.assemble_vector(kin, -pressure)
+        if values:
+            force = sparse_vector(
+                np.concatenate(values, axis=-1), np.concatenate(dofs), size=ndof
+            )
+        else:
+            force = csr_matrix((ndof, 1))
 
         if resize is not None:
             force.resize(*resize.shape)
@@ -1942,23 +2070,37 @@ class SolidBodyContact:
         return force
 
     def _matrix(self, field=None, parallel=False, resize=None):
-        "Assemble the sparse contact stiffness matrix."
+        """Assemble the sparse contact stiffness matrix. The matrices of the face-pairs
+        of all surface pairs are summed up at once by a sparsity pattern, which is
+        re-used as long as the face-pairs in contact don't change."""
 
         kinematics = self._extract(field=field, parallel=parallel)
         ndof = self.pairs[0].ndof
-        stiffness = csr_matrix((ndof, ndof))
 
+        values, dofs = [], []
         for pair, kin in zip(self.pairs, kinematics):
-            if kin is None:
-                continue
+            if kin is not None:
+                pressure, dpressure = self.pressure(kin["gap"])
+                values.append(
+                    pair.matrix(
+                        kin, -pressure, -dpressure, geometric=self.geometric_stiffness
+                    )
+                )
+                dofs.append(pair.dofs(kin))
 
-            pressure, dpressure = self.pressure(kin["gap"])
-            stiffness += pair.assemble_matrix(
-                kin,
-                -pressure,
-                -dpressure,
-                geometric=self.geometric_stiffness,
+        if values:
+            dofs = np.concatenate(dofs)
+
+            # the face-pairs in contact are often unchanged between the iterations of
+            # the Newton-Raphson method, then the sparsity pattern is re-used
+            if self._pattern is None or not np.array_equal(self._pattern[0], dofs):
+                self._pattern = (dofs, sparsity_pattern(dofs, ndof, self.pairs[0].dim))
+
+            stiffness = sparse_matrix(
+                np.concatenate(values, axis=-1), self._pattern[1], self.pairs[0].dim
             )
+        else:
+            stiffness = csr_matrix((ndof, ndof))
 
         if resize is not None:
             stiffness.resize(*resize.shape)

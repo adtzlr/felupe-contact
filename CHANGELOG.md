@@ -76,6 +76,10 @@ All notable changes to this project will be documented in this file. The format 
 - Added a warning for self-contact, if integration points are in contact with their own
   body in the undeformed configuration, i.e. if `max_distance` exceeds the thickness of
   a body.
+- Added `ContactSurfacePair.dofs()`, `ContactSurfacePair.vector()` and
+  `ContactSurfacePair.matrix()`, which return the degrees of freedom and the force
+  vectors and stiffness matrices of the face-pairs, and the helpers `sparse_vector()`,
+  `sparsity_pattern()` and `sparse_matrix()` for their assembly.
 - Added the tests `tests/test_solidbody_mode.py` and `tests/test_contact_search.py`.
 - Added the documentation, which is built by Sphinx (with the PyData theme, like FElupe)
   on Read the Docs. It contains an API reference and a gallery of the examples, which
@@ -162,6 +166,14 @@ All notable changes to this project will be documented in this file. The format 
 - Changed `closest_point_projection()` to iterate only the pairs which are not
   converged yet (active set) and to evaluate the shape functions and their derivatives
   at once by `BatchedElement.evaluate()`.
+- Changed the assembly of the contact stiffness matrix: the stiffness matrix of a
+  face-pair is evaluated by a single contraction of the stacked variations of both
+  faces instead of three blocks and the matrices of all surface pairs are summed up at
+  once by the sparsity pattern of FElupe (`felupe.assembly._sparsity.SparsityPattern`).
+  The sparsity pattern is re-used as long as the face-pairs in contact don't change.
+  The force vector is summed up by `numpy.bincount()`. Both replace the conversion of
+  all values from the COO- to the CSR-format and the addition of sparse matrices,
+  which is about three times faster.
 - Changed `connected_bodies()` to support a list of point-connectivities, e.g. of
   cells with different numbers of points.
 - Changed Ex. 2 and Ex. 3 to create the contact on the solid bodies and the README to
@@ -227,6 +239,9 @@ All notable changes to this project will be documented in this file. The format 
 - Removed the argument `order` of `BatchedElement.monomials()`. The partial
   derivatives of the shape functions are evaluated by the stacked coefficients of the
   derivatives instead of differentiating the monomials on each evaluation.
+- Removed `ContactSurfacePair._assemble()` and `ContactSurfacePair._indices()` in favour
+  of `ContactSurfacePair.dofs()` and the helpers `sparse_vector()` and
+  `sparse_matrix()`.
 - Removed `shape_function_quad()` and the hard-coded second derivative of the shape
   functions of a bilinear quad. Both are already available in `felupe.Quad`, which
   evaluates its shape functions, their gradients and their hessians for a batch of

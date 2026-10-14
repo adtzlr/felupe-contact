@@ -3,6 +3,7 @@
 import felupe as fem
 import numpy as np
 import pytest
+from scipy.sparse import csr_matrix
 
 from felupe_contact import SolidBodyContact
 from felupe_contact._solidbody_contact import (
@@ -311,3 +312,64 @@ def test_connected_bodies_of_cells_with_different_numbers_of_points():
     assert len(np.unique(labels[:5])) == 1
     assert labels[5] == labels[6]
     assert labels[5] != labels[0]
+
+
+def test_assembly_by_the_sparsity_pattern():
+    """The vector and the matrix of a surface pair are equal to an assembly in the
+    coordinate format (COO)."""
+
+    mesh = two_blocks()
+    x = mesh.points.copy()
+    x[mesh.z > 1.0, 2] -= 0.06
+
+    surface = fem.FieldContainer([fem.Field(fem.RegionHexahedronBoundary(mesh), dim=3)])
+    contact = SolidBodyContact(surface, penalty=1.0)
+    pair = contact.pairs[0]
+    kin = kinematics(contact, x)
+
+    pressure, dpressure = contact.pressure(kin["gap"])
+    dofs = pair.dofs(kin)
+    size = (pair.ndof, pair.ndof)
+
+    values = pair.vector(kin, -pressure)
+    reference = csr_matrix(
+        (values.T.ravel(), (dofs.ravel(), np.zeros(dofs.size, dtype=int))),
+        shape=(pair.ndof, 1),
+    )
+    vector = pair.assemble_vector(kin, -pressure)
+
+    assert np.allclose(vector.toarray(), reference.toarray())
+
+    values = pair.matrix(kin, -pressure, -dpressure)
+    rows = np.broadcast_to(dofs.T[:, None, :], values.shape)
+    cols = np.broadcast_to(dofs.T[None, :, :], values.shape)
+    reference = csr_matrix((values.ravel(), (rows.ravel(), cols.ravel())), shape=size)
+    matrix = pair.assemble_matrix(kin, -pressure, -dpressure)
+
+    assert np.allclose(matrix.toarray(), reference.toarray())
+    assert np.allclose(matrix.toarray(), matrix.toarray().T)
+
+
+def test_sparsity_pattern_is_reused():
+    "The sparsity pattern is re-used as long as the face-pairs don't change."
+
+    mesh = two_blocks()
+    field = fem.FieldContainer([fem.Field(fem.RegionHexahedron(mesh), dim=3)])
+    solid = fem.SolidBody(umat=fem.NeoHooke(mu=1.0, bulk=50.0), field=field)
+    contact = SolidBodyContact(solid)
+
+    field[0].values[mesh.z > 1.0, 2] = -0.06
+    contact.assemble.matrix()
+    dofs, pattern = contact._pattern
+
+    # a slightly different penetration, the same face-pairs are in contact
+    field[0].values[mesh.z > 1.0, 2] = -0.061
+    contact.assemble.matrix()
+
+    assert contact._pattern[1] is pattern
+
+    # a lateral displacement, other face-pairs are in contact
+    field[0].values[mesh.z > 1.0, 0] = 0.1
+    contact.assemble.matrix()
+
+    assert contact._pattern[1] is not pattern
