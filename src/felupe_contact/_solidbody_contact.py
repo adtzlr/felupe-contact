@@ -210,14 +210,17 @@ def contiguous(arrays):
 
 
 def copy_statevars(statevars):
-    """Return a copy of the state variables of the friction.
+    """Return a copy of the state variables of a contact.
 
     Parameters
     ----------
     statevars : dict or None
-        The state variables of the friction, i.e. the deformed coordinates ``points``
-        of the mesh and the lists ``face`` and ``coordinates`` with the anchors of each
-        surface pair, or None for a frictionless contact.
+        The state variables of a contact, given as arrays or as lists of arrays (one
+        per surface pair), e.g. the deformed coordinates ``points`` of the mesh and the
+        lists ``face`` and ``coordinates`` with the anchors of the friction or the list
+        ``material`` with the state variables of the material model at the integration
+        points of the contact surfaces of a Nitsche contact. None is returned for a
+        contact without state variables.
 
     Returns
     -------
@@ -229,9 +232,10 @@ def copy_statevars(statevars):
         return None
 
     return {
-        "points": statevars["points"].copy(),
-        "face": [face.copy() for face in statevars["face"]],
-        "coordinates": [xi.copy() for xi in statevars["coordinates"]],
+        key: [array.copy() for array in value]
+        if isinstance(value, list)
+        else value.copy()
+        for key, value in statevars.items()
     }
 
 
@@ -805,7 +809,9 @@ class ContactSurfacePair:
         # duplicate face-pairs are equal and only one of them is selected
         return np.concatenate(point), np.concatenate(face)
 
-    def discard(self, point, face, points, bounds, normals, max_distance, facing):
+    def discard(
+        self, point, face, points, bounds, normals, max_distance, facing, max_gap=0.0
+    ):
         r"""Return the candidate face-pairs which are able to touch, i.e. discard the
         face-pairs for which the contact search would not find a valid projection.
 
@@ -826,6 +832,9 @@ class ContactSurfacePair:
             surface which is considered by the contact search.
         facing : float
             The minimum opposition of the outward unit normal vectors of a face-pair.
+        max_gap : float, optional
+            The maximum (positive) gap of a valid projection (default is 0.0), i.e. the
+            integration points in front of a face are considered up to this distance.
 
         Returns
         -------
@@ -838,23 +847,26 @@ class ContactSurfacePair:
         -----
         A valid projection :math:`\bar{\boldsymbol{x}}` of an integration point
         :math:`\boldsymbol{x} = \bar{\boldsymbol{x}} + g\ \boldsymbol{n}` is located on
-        the (extended) face with a negative gap :math:`-g_{max} < g < 0`. The heights
-        :math:`h_{min} \le (\bar{\boldsymbol{x}} - \boldsymbol{c}) \cdot
-        \boldsymbol{n}_c \le h_{max}` of a face w.r.t. the tangent plane at its center
-        and the maximum angle :math:`\theta` between its normal vectors and the normal
-        vector at its center are known, see :meth:`bounds`. Hence, the height of a valid
-        integration point is bounded, see Eq. :eq:`contact-height`.
+        the (extended) face with a gap :math:`-g_{max} < g < g_{open}`, where the
+        maximum positive gap :math:`g_{open}` (``max_gap``) is zero for a penalty
+        contact. The heights :math:`h_{min} \le (\bar{\boldsymbol{x}} -
+        \boldsymbol{c}) \cdot \boldsymbol{n}_c \le h_{max}` of a face w.r.t. the tangent
+        plane at its center and the maximum angle :math:`\theta` between its normal
+        vectors and the normal vector at its center are known, see :meth:`bounds`.
+        Hence, the height of a valid integration point is bounded, see Eq.
+        :eq:`contact-height`.
 
         ..  math::
             :label: contact-height
 
             h_{min} - g_{max} \le
                 (\boldsymbol{x} - \boldsymbol{c}) \cdot \boldsymbol{n}_c
-            \le h_{max} \quad \text{if} \quad \theta < \frac{\pi}{2}
+            \le h_{max} + g_{open} \quad \text{if} \quad \theta < \frac{\pi}{2}
 
         Its in-plane distance to the center is bounded by the radius :math:`r` of the
         face and the in-plane component of the gap vector,
-        :math:`r + g_{max} \sin(\theta)`. The outward unit normal vector of the face of
+        :math:`r + \max(g_{max}, g_{open}) \sin(\theta)`. The outward unit normal vector
+        of the face of
         the integration point must be opposed to the normal vector at the projection,
         i.e. the angle between this normal vector and :math:`\boldsymbol{n}_c` must be
         greater than :math:`\arccos(-facing) - \theta`.
@@ -875,9 +887,11 @@ class ContactSurfacePair:
         tolerance = 1e-3 * radius
         bent = angle >= np.pi / 2
 
-        upper = np.where(bent, np.inf, bounds["upper"] + tolerance)
+        upper = np.where(bent, np.inf, bounds["upper"] + max_gap + tolerance)
         lower = np.where(bent, -np.inf, bounds["lower"] - max_distance - tolerance)
-        inplane = np.where(bent, np.inf, radius + max_distance * np.sin(angle))
+        inplane = np.where(
+            bent, np.inf, radius + max(max_distance, max_gap) * np.sin(angle)
+        )
         inplane += tolerance
 
         # the outward unit normal vectors of the faces must be able to be opposed
@@ -903,7 +917,15 @@ class ContactSurfacePair:
         return point[keep], face[keep]
 
     def kinematics(
-        self, x, max_distance, candidates, tolerance, facing, self_contact, workers=1
+        self,
+        x,
+        max_distance,
+        candidates,
+        tolerance,
+        facing,
+        self_contact,
+        workers=1,
+        max_gap=0.0,
     ):
         r"""Return the contact kinematics, evaluated at the integration points of the
         faces of the secondary surface.
@@ -930,6 +952,11 @@ class ContactSurfacePair:
             Flag to consider face-pairs which belong to the same body of the mesh.
         workers : int, optional
             The number of workers used for the tree-query (default is 1).
+        max_gap : float, optional
+            The maximum (positive) gap of a valid projection (default is 0.0). A
+            penalty contact only considers penetrating integration points, a Nitsche
+            contact also integration points in front of the primary surface, see
+            :class:`~felupe_contact.SolidBodyContactNitsche`.
 
         Returns
         -------
@@ -966,12 +993,18 @@ class ContactSurfacePair:
         bounds = self.bounds(vertices, extent=1 + 2 * tolerance)
         normals = self.normals(x)
 
-        # broad-phase contact search
+        # broad-phase contact search. the tree-query covers integration points behind
+        # (penetration) and in front of the faces (positive gap)
         point, face = self.candidates(
-            points, bounds, max_distance, candidates, self_contact, workers
+            points,
+            bounds,
+            max(max_distance, max_gap),
+            candidates,
+            self_contact,
+            workers,
         )
         point, face = self.discard(
-            point, face, points, bounds, normals, max_distance, facing
+            point, face, points, bounds, normals, max_distance, facing, max_gap
         )
 
         cell = point % self.ncells
@@ -1038,7 +1071,12 @@ class ContactSurfacePair:
         # surface and if the (signed) distance is within the search distance
         inside = np.all(np.abs(coordinates) <= 1 + released, axis=0)
         valid = (
-            converged & minimum & inside & opposed & (gap < 0) & (gap > -max_distance)
+            converged
+            & minimum
+            & inside
+            & opposed
+            & (gap < max_gap)
+            & (gap > -max_distance)
         )
 
         if not np.any(valid):
@@ -1190,6 +1228,79 @@ class ContactSurfacePair:
         )
 
         return b, A, B
+
+    def variations_projection(self, kinematics, A, B, contravariant=None):
+        r"""Return the change of the natural element coordinates of the projected points
+        and of the outward unit normal vectors of the primary surface w.r.t. the
+        displacements of the points of a face-pair.
+
+        Parameters
+        ----------
+        kinematics : dict
+            The contact kinematics, see :meth:`~ContactSurfacePair.kinematics`.
+        A : ndarray of shape (dim - 1, nvars_primary, npairs)
+            The variation :math:`A_\alpha` of the primary surface, see
+            :meth:`variations`.
+        B : list of ndarray of shape (dim - 1, nvars, npairs)
+            The variation :math:`B_\alpha` for the secondary and the primary surface,
+            see :meth:`variations`.
+        contravariant : ndarray of shape (dim - 1, dim, npairs) or None, optional
+            The contravariant tangent vectors :math:`\boldsymbol{a}^\alpha` of the
+            primary surface at the projected points (default is None). If None, they
+            are evaluated from the metric and the tangent vectors.
+
+        Returns
+        -------
+        Xi : ndarray of shape (dim - 1, nvars + nvars_primary, npairs)
+            The change :math:`\Delta \xi^\alpha` of the natural element coordinates of
+            the projected points.
+        N : ndarray of shape (dim, nvars + nvars_primary, npairs)
+            The change :math:`\Delta \boldsymbol{n}` of the outward unit normal vectors.
+
+        Notes
+        -----
+        The change of the natural element coordinates follows from the linearization of
+        the closest-point projection with the modified metric :math:`H_{\alpha\beta} =
+        a_{\alpha\beta} - g\ \kappa_{\alpha\beta}`, see Eq. :eq:`projection-change`.
+        The variation :math:`A_\alpha` is zero for the face of the secondary surface.
+
+        ..  math::
+            :label: projection-change
+
+            \Delta \xi^\alpha &= H^{\alpha\beta} \left(
+                \Delta B_\beta + g\ \Delta A_\beta \right)
+
+            \Delta \boldsymbol{n} &= -\boldsymbol{a}^\alpha \left(
+                \Delta A_\alpha + \kappa_{\alpha\beta}\ \Delta \xi^\beta \right)
+        """
+
+        gap = kinematics["gap"]
+        metric = kinematics["metric"]
+        curvature = kinematics["curvature"]
+
+        npairs = len(gap)
+        zeros = np.zeros((self.dim - 1, self.nvars, npairs))
+        A = np.concatenate([zeros, A], axis=1)
+        B = np.concatenate(B, axis=1)
+
+        # the inverse of a tensor is not contiguous in memory, which slows down the
+        # contractions by einsum
+        inverse_H = np.ascontiguousarray(inv(metric - gap * curvature))
+        Xi = np.einsum("JKp,Kvp->Jvp", inverse_H, B + gap * A)
+
+        if contravariant is None:
+            inverse_metric = np.ascontiguousarray(inv(metric))
+            contravariant = np.einsum(
+                "JKp,Kip->Jip", inverse_metric, kinematics["tangents"]
+            )
+
+        N = -np.einsum(
+            "Jip,Jvp->ivp",
+            contravariant,
+            A + np.einsum("JKp,Kvp->Jvp", curvature, Xi),
+        )
+
+        return Xi, N
 
     def dofs(self, kinematics):
         """Return the degrees of freedom of the face-pairs, i.e. the components of the
@@ -1884,7 +1995,6 @@ class ContactSurfacePair:
         point = kinematics["point"]
         normal = kinematics["normal"]
         npairs = len(point)
-        nsurface = self.dim - 1
 
         q, c = np.divmod(point, self.ncells)
         dA = self.weight * self.dA[q, c]
@@ -1912,23 +2022,10 @@ class ContactSurfacePair:
         E = W - normal[:, None] * np.einsum("ip,ivp->vp", normal, W)
 
         if geometric:
-            gap = kinematics["gap"]
-            metric = kinematics["metric"]
-            curvature = kinematics["curvature"]
-
             # the change of the natural element coordinates of the projection and of
-            # the unit normal vector. the variation A is zero for the secondary surface
-            zeros = np.zeros((nsurface, self.nvars, npairs))
-            A = np.concatenate([zeros, A], axis=1)
-            B = np.concatenate(B, axis=1)
-
-            # the inverse of a tensor is not contiguous in memory
-            inverse_H = np.ascontiguousarray(inv(metric - gap * curvature))
-            Xi = np.einsum("JKp,Kvp->Jvp", inverse_H, B + gap * A)
-            N = -np.einsum(
-                "Jip,Jvp->ivp",
-                results["contravariant"],
-                A + np.einsum("JKp,Kvp->Jvp", curvature, Xi),
+            # the unit normal vector
+            Xi, N = self.variations_projection(
+                kinematics, A, B, contravariant=results["contravariant"]
             )
 
             w = results["w"]
@@ -2797,20 +2894,7 @@ class SolidBodyContact:
         """
 
         pair = self.pairs[0]
-        diagonal = np.zeros(pair.ndof)
-
-        for item in self.items:
-            stiffness = item.results.stiffness
-
-            if stiffness is None:
-                stiffness = item.assemble.matrix()
-
-            if item.assemble.multiplier is not None:
-                stiffness = stiffness * item.assemble.multiplier
-
-            values = stiffness.diagonal()
-            size = min(len(values), pair.ndof)
-            diagonal[:size] += values[:size]
+        diagonal = self._diagonal()
 
         surfaces = [
             (pair.points, pair.area),
@@ -2825,6 +2909,28 @@ class SolidBodyContact:
         self.penalty = self.penalty_scale * min(penalty)
 
         return self.penalty
+
+    def _diagonal(self):
+        """Return the sum of the diagonal entries of the stiffness matrices of the
+        items, given for the degrees of freedom of the mesh of the contact surfaces."""
+
+        ndof = self.pairs[0].ndof
+        diagonal = np.zeros(ndof)
+
+        for item in self.items:
+            stiffness = item.results.stiffness
+
+            if stiffness is None:
+                stiffness = item.assemble.matrix()
+
+            if item.assemble.multiplier is not None:
+                stiffness = stiffness * item.assemble.multiplier
+
+            values = stiffness.diagonal()
+            size = min(len(values), ndof)
+            diagonal[:size] += values[:size]
+
+        return diagonal
 
     def _extract(self, field=None, parallel=False):
         """Evaluate and cache the contact kinematics of all surface pairs, together
@@ -2937,7 +3043,6 @@ class SolidBodyContact:
         all surface pairs are summed up at once."""
 
         kinematics = self._extract(field=field, parallel=parallel)
-        ndof = self.pairs[0].ndof
 
         values, dofs = [], []
         for pair, kin, fr in zip(self.pairs, kinematics, self._friction):
@@ -2949,6 +3054,14 @@ class SolidBodyContact:
 
                 values.append(vector)
                 dofs.append(pair.dofs(kin))
+
+        return self._assemble_vector(values, dofs, resize=resize)
+
+    def _assemble_vector(self, values, dofs, resize=None):
+        """Sum up the force vectors of the face-pairs of all surface pairs at once and
+        store the assembled sparse vector in the results."""
+
+        ndof = self.pairs[0].ndof
 
         if values:
             force = sparse_vector(
@@ -2964,13 +3077,41 @@ class SolidBodyContact:
 
         return force
 
+    def _assemble_matrix(self, values, dofs, resize=None):
+        """Sum up the stiffness matrices of the face-pairs of all surface pairs at once
+        and store the assembled sparse matrix in the results. The sparsity pattern is
+        re-used as long as the face-pairs in contact don't change."""
+
+        ndof = self.pairs[0].ndof
+        dim = self.pairs[0].dim
+
+        if values:
+            dofs = np.concatenate(dofs)
+
+            # the face-pairs in contact are often unchanged between the iterations of
+            # the Newton-Raphson method, then the sparsity pattern is re-used
+            if self._pattern is None or not np.array_equal(self._pattern[0], dofs):
+                self._pattern = (dofs, sparsity_pattern(dofs, ndof, dim))
+
+            stiffness = sparse_matrix(
+                np.concatenate(values, axis=-1), self._pattern[1], dim
+            )
+        else:
+            stiffness = csr_matrix((ndof, ndof))
+
+        if resize is not None:
+            stiffness.resize(*resize.shape)
+
+        self.results.stiffness = stiffness
+
+        return stiffness
+
     def _matrix(self, field=None, parallel=False, resize=None):
         """Assemble the sparse contact stiffness matrix. The matrices of the face-pairs
         of all surface pairs are summed up at once by a sparsity pattern, which is
         re-used as long as the face-pairs in contact don't change."""
 
         kinematics = self._extract(field=field, parallel=parallel)
-        ndof = self.pairs[0].ndof
 
         values, dofs = [], []
         for pair, kin, fr in zip(self.pairs, kinematics, self._friction):
@@ -2991,23 +3132,4 @@ class SolidBodyContact:
                 values.append(matrix)
                 dofs.append(pair.dofs(kin))
 
-        if values:
-            dofs = np.concatenate(dofs)
-
-            # the face-pairs in contact are often unchanged between the iterations of
-            # the Newton-Raphson method, then the sparsity pattern is re-used
-            if self._pattern is None or not np.array_equal(self._pattern[0], dofs):
-                self._pattern = (dofs, sparsity_pattern(dofs, ndof, self.pairs[0].dim))
-
-            stiffness = sparse_matrix(
-                np.concatenate(values, axis=-1), self._pattern[1], self.pairs[0].dim
-            )
-        else:
-            stiffness = csr_matrix((ndof, ndof))
-
-        if resize is not None:
-            stiffness.resize(*resize.shape)
-
-        self.results.stiffness = stiffness
-
-        return stiffness
+        return self._assemble_matrix(values, dofs, resize=resize)

@@ -38,6 +38,8 @@ The contact is an item of FElupe, i.e. it is added to the items of a :class:`~fe
 
    + a :class:`contact between the surfaces of deformable solid bodies <felupe_contact.SolidBodyContact>` (surface-to-surface, penalty-based) with optional :ref:`Coulomb friction <how-to-friction>`
 
+   + a frictionless :class:`Nitsche contact <felupe_contact.SolidBodyContactNitsche>` between solid bodies, whose contact pressure contains the normal stress of the bodies, i.e. its penetration doesn't grow with the contact pressure
+
    + an item of FElupe, i.e. it is used in a :class:`~felupe.Step`, a :class:`~felupe.Job` and a :class:`~felupe.CharacteristicCurve`, and with the :class:`~felupe.CutbackPlugin` and the :class:`~felupe.LinesearchPlugin`
 
    + three-dimensional, :class:`plane strain <felupe.FieldPlaneStrain>` and :class:`axisymmetric <felupe.FieldAxisymmetric>` problems
@@ -85,6 +87,10 @@ FElupe contains contact formulations with rigid surfaces and a contact by a thir
         - felupe-contact
         - deformable solid bodies (surface-to-surface)
         - Coulomb
+    *   - :class:`~felupe_contact.SolidBodyContactNitsche`
+        - felupe-contact
+        - deformable solid bodies (surface-to-surface, Nitsche)
+        - no
 
 Installation
 ------------

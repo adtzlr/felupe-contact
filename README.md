@@ -12,6 +12,7 @@ felupe-contact is an extension package for [FElupe](https://github.com/adtzlr/fe
 
 ## ✨ Highlights
 - ✅ a [contact between the surfaces of solid bodies](https://felupe-contact.readthedocs.io/en/latest/felupe_contact.html#felupe_contact.SolidBodyContact) (surface-to-surface, penalty-based) with optional [Coulomb friction](https://felupe-contact.readthedocs.io/en/latest/howto/friction.html)
+- ✅ a frictionless [Nitsche contact between solid bodies](https://felupe-contact.readthedocs.io/en/latest/felupe_contact.html#felupe_contact.SolidBodyContactNitsche), whose penetration doesn't grow with the contact pressure, also for bodies of very different stiffness (rubber-to-metal)
 - ✅ three-dimensional, plane strain and axisymmetric problems
 - ✅ all boundary regions of FElupe, i.e. faces with linear or quadratic shape functions
 - ✅ an item of FElupe, i.e. it is used in a `Step` and in a `Job` like a `SolidBody`
