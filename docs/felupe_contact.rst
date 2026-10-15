@@ -12,14 +12,16 @@ The contacts of felupe-contact are items of FElupe, see :class:`felupe.mechanics
 .. autosummary::
 
    SolidBodyContact
+   SolidBodyContactNitsche
 
 **Helpers for the Contact Kinematics**
 
-These classes and functions are used internally by :class:`~felupe_contact.SolidBodyContact`. They are not part of the public API, i.e. they may change without a deprecation.
+These classes and functions are used internally by :class:`~felupe_contact.SolidBodyContact` and :class:`~felupe_contact.SolidBodyContactNitsche`. They are not part of the public API, i.e. they may change without a deprecation.
 
 .. autosummary::
 
    _solidbody_contact.ContactSurfacePair
+   _nitsche.SurfaceStress
    _solidbody_contact.closest_point_projection
    _solidbody_contact.unit_normals
    _solidbody_contact.connected_bodies
@@ -32,6 +34,8 @@ These classes and functions are used internally by :class:`~felupe_contact.Solid
    _element.face_element
    _boundary.boundary_region
    _boundary.contact_surface
+   _nitsche.volume_cells
+   _nitsche.select
 
 **Related Classes of FElupe**
 
@@ -58,6 +62,11 @@ The building blocks of a model with a contact are taken from FElupe.
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: felupe_contact.SolidBodyContactNitsche
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: felupe_contact._solidbody_contact.ContactSurfacePair
    :members:
    :undoc-members:
@@ -78,6 +87,15 @@ The building blocks of a model with a contact are taken from FElupe.
 .. autofunction:: felupe_contact._solidbody_contact.copy_statevars
 
 .. autofunction:: felupe_contact._solidbody_contact.contiguous
+
+.. autoclass:: felupe_contact._nitsche.SurfaceStress
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autofunction:: felupe_contact._nitsche.volume_cells
+
+.. autofunction:: felupe_contact._nitsche.select
 
 .. autoclass:: felupe_contact._element.BatchedElement
    :members:

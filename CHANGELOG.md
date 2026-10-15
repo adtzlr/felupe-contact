@@ -148,6 +148,52 @@ All notable changes to this project will be documented in this file. The format 
   friction coefficient times the normal force and a cutback, which gives the same
   result as smaller increments), the how-to guide *Friction* and Ex. 7, a rubber block
   which is moved over a stiff base.
+- Added `SolidBodyContactNitsche`, a frictionless contact between the surfaces of solid
+  bodies, enforced by Nitsche's method (non-symmetric variant, θ = 0). The contact
+  pressure `[λ_N - γ g]_+` contains the normal stress `λ_N = (P N) · n` of the solid
+  bodies, evaluated by their material models at the integration points of the contact
+  surfaces. Hence, the formulation is consistent: for a homogeneous stress state on
+  matching meshes, the gap is zero and the contact pressure is equal to the normal
+  stress, independent of the Nitsche parameter (patch test). The contact is created on
+  solid bodies (`SolidBody` or `SolidBodyNearlyIncompressible` with the cell-wise
+  constant pressure), it supports three-dimensional, plane strain and axisymmetric
+  problems, all boundary regions of FElupe and material models with state variables,
+  which are evaluated at the integration points of the contact surfaces and updated
+  after a converged increment. The consistent stiffness matrix contains the elasticity
+  tensors of the material models w.r.t. the displacements of all points of the cells of
+  the faces. It is not symmetric.
+- Added the weighted two-pass evaluation of `SolidBodyContactNitsche` (default). The
+  contact is evaluated on both surfaces of a contact zone with the stress of each body
+  on its own surface, and the contact tractions of an integration point of the body `b`,
+  which is projected on the body `b̄`, are weighted by `k_b̄ / (k_b + k_b̄)`, where `k` is
+  the stiffness of a body (the estimate of the penalty stiffness, evaluated per body).
+  Both weights of a contact zone sum up to one, i.e. the formulation stays consistent.
+  For equal bodies, both weights are one half; for a rubber body on a stiff body, the
+  stress of the rubber body is used. The unweighted (unbiased) two-pass formulation
+  failed to converge for a stiffness ratio of 1000, because the contact pressure of the
+  stiff body requires a much higher Nitsche parameter. The Nitsche parameter is
+  estimated from the softest body.
+- Added the regularization of the contact pressure of `SolidBodyContactNitsche` w.r.t.
+  the effective penetration `s = λ_N / γ - g`. The contact pressure is exact for
+  `s ≥ δ`, the regularization causes a penetration of at most `4 δ / 27` within the
+  transition zone, independent of the contact pressure.
+- Added the argument `max_gap` to `ContactSurfacePair.kinematics()`, the maximum
+  positive gap of a valid projection (default is 0.0, i.e. unchanged for
+  `SolidBodyContact`). A Nitsche contact is also active for small positive gaps if the
+  normal stress is compressive.
+- Added `ContactSurfacePair.variations_projection()`, which returns the change of the
+  natural element coordinates of the projected points and of the outward unit normal
+  vectors. It is used by the friction and by the Nitsche contact.
+- Added `felupe_contact._nitsche.SurfaceStress`, which evaluates the stress tensors of a
+  solid body at the integration points of its contact surface and their change w.r.t.
+  the displacements of the points of the cells of the faces, and the helpers
+  `volume_cells()` (the cells of a mesh which contain the cells of a boundary region)
+  and `select()`.
+- Added the tests `tests/test_nitsche.py` (incl. the tangent of the force vector for
+  all boundary regions with `SolidBody` and `SolidBodyNearlyIncompressible`, the patch
+  test for one and for two materials with a stiffness ratio of 1000, the weights, a
+  material model with state variables and a cutback) and Ex. 8, a rubber block which is
+  pressed on a stiff base with two solid bodies.
 
 ### Fixed
 - Fixed the connected bodies of a body with an enclosed cavity. The bodies were
@@ -185,6 +231,11 @@ All notable changes to this project will be documented in this file. The format 
   are not in contact if other integration points are in contact.
 
 ### Changed
+- Changed `copy_statevars()`, which copies any dict of arrays or lists of arrays, e.g.
+  the state variables of the material models of a Nitsche contact.
+- Changed the assembly of `SolidBodyContact` into the helpers `_assemble_vector()`,
+  `_assemble_matrix()` and `_diagonal()`, which are shared with
+  `SolidBodyContactNitsche` (the results are unchanged).
 - Changed the contact search of `ContactSurfacePair.kinematics()`, which is about ten
   times faster for contact surfaces with all faces on the outline of the meshes and
   about 60 times faster for many bodies (the results are unchanged):
