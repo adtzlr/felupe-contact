@@ -97,6 +97,16 @@ def solid_body(mesh, field_type=fem.Field, region=fem.RegionHexahedron, kind="so
             umat=fem.NeoHooke(mu=1.0), field=field, bulk=20.0
         )
 
+    elif kind == "time-dependent":
+        # the time increment is an input of the material model (FElupe v12.0.0 and
+        # later), given by the time increment of the solid body
+        umat = fem.Hyperelastic(
+            fem.finite_strain_viscoelastic, mu=1.0, eta=1.0, nstatevars=6
+        )
+        solid = fem.SolidBodyNearlyIncompressible(
+            umat=umat, field=field, bulk=20.0, time_step=1.0
+        )
+
     else:
         umat = fem.Hyperelastic(
             fem.finite_strain_viscoelastic, mu=1.0, eta=1.0, dtime=1.0, nstatevars=6
@@ -215,8 +225,10 @@ def test_stiffness_is_the_tangent_with_state_variables():
     assert statevars.shape[0] == 6
     assert np.allclose(statevars, 0.0)
 
-    # a converged increment updates the state variables of all integration points
-    field[0].values[upper, 2] = -0.05
+    # a converged increment updates the state variables of all integration points. the
+    # deformation must not be a rigid body motion, because the state variables of the
+    # viscoelastic material are zero for the undeformed state (FElupe >= 12)
+    configure(field, upper, seed=1)
     contact.assemble.vector(field=field)
     contact.results.update_statevars()
 
@@ -337,11 +349,14 @@ def solve(kind="solid", move=-0.3, num=3, plugins=None, **kwargs):
         "clamped": fem.Boundary(field[0], fz=mesh.z.max(), skip=(0, 0, 1)),
         "move": fem.Boundary(field[0], fz=mesh.z.max(), skip=(1, 1, 0)),
     }
-    step = fem.Step(
-        items=[solid, contact],
-        ramp={boundaries["move"]: fem.math.linsteps([0, move], num=num)},
-        boundaries=boundaries,
-    )
+    ramp = {boundaries["move"]: fem.math.linsteps([0, move], num=num)}
+
+    if kind == "time-dependent":
+        # the times start at one, i.e. all time increments are one, like the constant
+        # time increment of the viscoelastic material model
+        ramp[fem.TimeStep(items=[solid])] = fem.math.linsteps([1, 1 + num], num=num)
+
+    step = fem.Step(items=[solid, contact], ramp=ramp, boundaries=boundaries)
     job = fem.Job(steps=[step], plugins=plugins or []).evaluate(verbose=0)
 
     return contact, solid, job
@@ -395,6 +410,77 @@ def test_job_with_cutback():
 
     for a, b in zip(contact.results.statevars["material"], statevars["material"]):
         assert np.allclose(a, b)
+
+
+TIME_DEPENDENT = pytest.mark.skipif(
+    not hasattr(fem, "TimeStep"),
+    reason="time-dependent material models require FElupe v12.0.0 or later",
+)
+
+
+@TIME_DEPENDENT
+def test_time_dependent_material():
+    """A time-dependent material model takes the time increment of the solid body. The
+    force vector and the stiffness matrix are equal to those of the material model with
+    a constant time increment and the stiffness matrix is the tangent of the force
+    vector."""
+
+    assembled = []
+
+    for kind in ["viscoelastic", "time-dependent"]:
+        contact, field, solid, upper = nitsche(HEXAHEDRON, fem.Field, kind=kind)
+        configure(field, upper)
+
+        vector = contact.assemble.vector(field=field).toarray()
+        matrix = contact.assemble.matrix(field=field).toarray()
+        assembled.append((vector, matrix))
+
+    assert solid.umat.time_dependent
+
+    for constant, time_dependent in zip(*assembled):
+        assert np.allclose(constant, time_dependent)
+
+    check_tangent(contact, field)
+
+    # a new time increment re-evaluates the cached stress for the same displacements
+    solid.time_step = 0.5
+    vector = contact.assemble.vector(field=field).toarray()
+    assert not np.allclose(vector, assembled[1][0])
+
+
+@TIME_DEPENDENT
+def test_time_dependent_material_without_time_increment():
+    "A time-dependent material model requires the time increment of the solid body."
+
+    contact, field, solid, upper = nitsche(HEXAHEDRON, fem.Field, kind="time-dependent")
+    configure(field, upper)
+
+    # the penalty parameter is estimated with the time increment of the solid body
+    contact.assemble.vector(field=field)
+    solid.time_step = None
+
+    with pytest.raises(ValueError, match="material .* of the contact surface"):
+        contact.assemble.vector(field=field)
+
+
+@TIME_DEPENDENT
+def test_job_with_time_step():
+    """The time increments of a time step item drive the time-dependent material model
+    of the solid body and of the contact. The results are equal to those of the material
+    model with a constant time increment."""
+
+    contact, solid, job = solve(kind="viscoelastic")
+    contact_time, solid_time, job_time = solve(kind="time-dependent")
+
+    assert solid_time.time_step == 1.0
+    assert all([len(norms) <= 8 for norms in job_time.fnorms])
+    assert np.allclose(solid.field[0].values, solid_time.field[0].values)
+
+    statevars = contact.results.statevars["material"][0]
+    statevars_time = contact_time.results.statevars["material"][0]
+
+    assert not np.allclose(statevars_time, 0.0)
+    assert np.allclose(statevars, statevars_time)
 
 
 def test_surface_pairs():

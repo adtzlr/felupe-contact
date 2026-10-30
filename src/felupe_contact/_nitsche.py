@@ -130,7 +130,9 @@ class SurfaceStress:
 
     The material model is evaluated with own state variables at the integration points
     of the contact surface. These are only updated after a converged increment, like
-    the state variables of a solid body.
+    the state variables of a solid body. A time-dependent material model (FElupe
+    v12.0.0 and later) takes the current time increment ``time_step`` of the solid body,
+    e.g. updated by a :class:`~felupe.TimeStep`.
 
     For a :class:`~felupe.SolidBodyNearlyIncompressible`, the stress tensor contains the
     cell-wise constant pressure :math:`p = K (v / V - 1)` of the cell of a face, see Eq.
@@ -150,6 +152,7 @@ class SurfaceStress:
         displacement = surface[0]
         umat = solid.umat
 
+        self.solid = solid
         self.umat = umat
         self.dim = region.mesh.dim
         self.axisymmetric = isinstance(displacement, FieldAxisymmetric)
@@ -210,6 +213,26 @@ class SurfaceStress:
             self.radius_volume = solid.field[0].radius
             self.dV_volume = 2 * np.pi * self.radius_volume * region.dV
 
+    def kwargs(self):
+        """Return the keyword-arguments of the methods ``gradient`` and ``hessian`` of
+        the material model, i.e. the current time increment ``dtime`` of the solid body
+        for a time-dependent material model (FElupe v12.0.0 and later)."""
+
+        if not getattr(self.umat, "time_dependent", False):
+            return {}
+
+        dtime = getattr(self.solid, "time_step", None)
+
+        if dtime is None:
+            raise ValueError(
+                f"The material {type(self.umat).__name__} of the contact surface is "
+                "time-dependent and requires the time increment `time_step` of the "
+                "solid body. Add a time step item to the ramp of the step, e.g. "
+                "`time = fem.TimeStep(items=[solid])`, or set `solid.time_step`."
+            )
+
+        return {"dtime": dtime}
+
     def statevars(self):
         "Return the initial state variables of the material model (zeros)."
 
@@ -237,7 +260,7 @@ class SurfaceStress:
         self.field[0].values = values
 
         F = self.field.extract()[0]
-        gradient = self.umat.gradient([F, statevars])
+        gradient = self.umat.gradient([F, statevars], **self.kwargs())
 
         return {"F": F, "P": gradient[0], "statevars": gradient[-1]}
 
@@ -415,7 +438,7 @@ class SurfaceStress:
         # the elasticity tensor of the material model at the integration points in
         # contact, evaluated with the state variables of the last converged increment
         x = [F[:, :, None], statevars[..., q, c][..., None, :]]
-        A = self.umat.hessian(x)[0][..., 0, :]
+        A = self.umat.hessian(x, **self.kwargs())[0][..., 0, :]
 
         if self.incompressible:
             A = A + traction["pressure"] * self.area_change.gradient([F])[0]
@@ -767,8 +790,10 @@ class SolidBodyContactNitsche(SolidBodyContact):
     <felupe_contact._nitsche.SurfaceStress.matrix>`. It is not symmetric. The material
     model is evaluated with own state variables at the integration points of the
     contact surfaces, which are updated after a converged increment like the state
-    variables of the solid bodies. For a :class:`~felupe.SolidBodyNearlyIncompressible`,
-    the cell-wise constant pressure of the solid body is included in the stress tensor.
+    variables of the solid bodies. A time-dependent material model takes the time
+    increment of its solid body, e.g. updated by a :class:`~felupe.TimeStep`. For a
+    :class:`~felupe.SolidBodyNearlyIncompressible`, the cell-wise constant pressure of
+    the solid body is included in the stress tensor.
 
     ..  note::
 
@@ -965,6 +990,7 @@ class SolidBodyContactNitsche(SolidBodyContact):
         self.surfaces = [
             SurfaceStress(bodies[id(pair.field)], pair.field) for pair in self.pairs
         ]
+        self._time_steps = None
 
         self.max_gap = max_gap
         if max_gap is None:
@@ -1180,7 +1206,8 @@ class SolidBodyContactNitsche(SolidBodyContact):
         with the stress tensors of the solid bodies at the integration points of the
         contact surfaces and the trial state variables of the material models. Only the
         integration points with a positive contact pressure are kept. The cache is
-        re-evaluated for new displacements and for new (converged) state variables."""
+        re-evaluated for new displacements, for new (converged) state variables and for
+        new time increments of time-dependent material models."""
 
         if field is not None:
             self.field = field
@@ -1188,10 +1215,15 @@ class SolidBodyContactNitsche(SolidBodyContact):
         values = self.field[0].values
         self.field_primary[0].values = values
 
+        # the time increments of the solid bodies with time-dependent material models,
+        # e.g. updated by a time step item
+        time_steps = [surface.kwargs() for surface in self.surfaces]
+
         if (
             self._kinematics is not None
             and np.array_equal(self._values, values)
             and self._state is self.results.statevars
+            and self._time_steps == time_steps
         ):
             return self._kinematics
 
@@ -1248,6 +1280,7 @@ class SolidBodyContactNitsche(SolidBodyContact):
         self._weights = weights
         self._values = values.copy()
         self._state = self.results.statevars
+        self._time_steps = time_steps
 
         self.results._statevars = {"material": material}
 
