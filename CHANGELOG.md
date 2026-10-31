@@ -229,6 +229,22 @@ All notable changes to this project will be documented in this file. The format 
   i.e. after a complete loss of contact, an integration point got the face of an
   outdated evaluation. Now, no face is assigned, like for the integration points which
   are not in contact if other integration points are in contact.
+- Fixed `SolidBodyContactNitsche` for time-dependent material models of FElupe v12.0.0
+  and later, i.e. material models whose time increment is an input like the
+  deformation gradient, e.g. `Hyperelastic(finite_strain_viscoelastic, mu=1.0,
+  eta=1.0, nstatevars=6)`. The material model of a contact surface is evaluated with
+  the time increment `time_step` of its solid body, e.g. updated by a `TimeStep` in the
+  ramp of a step, and the cached stress tensors are re-evaluated for a new time
+  increment. Before, `umat.gradient()` and `umat.hessian()` were called without the
+  time increment, which raised a `ValueError`. Material models with a constant time
+  increment, e.g. `dtime=1.0`, are unchanged. Tests are added for the force vector and
+  the tangent, a missing time increment and a job with a time step item (skipped for
+  FElupe before v12.0.0).
+- Fixed the test of the state variables of a material model of `SolidBodyContactNitsche`
+  for FElupe v12.0.0 and later. The state variables of `finite_strain_viscoelastic()`
+  are now the deviation of the inelastic right Cauchy-Green deformation tensor from the
+  identity, i.e. they stay zero for a rigid body motion. The test now distorts the
+  upper block.
 
 ### Changed
 - Changed `copy_statevars()`, which copies any dict of arrays or lists of arrays, e.g.
