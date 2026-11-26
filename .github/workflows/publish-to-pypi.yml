@@ -1,0 +1,82 @@
+name: Publish Python to PyPI
+
+# build the distributions on each push and publish them on PyPI for each tag v*, like
+# FElupe, with trusted publishing: the environment "pypi" of the repository and a
+# trusted publisher of the project on PyPI (the owner adtzlr, the repository
+# felupe-contact, the workflow publish-to-pypi.yml, the environment pypi), no token
+on: push
+
+# read-only by default, only the job "publish" gets an OIDC token
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the distributions
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - name: Setup Python
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: '3.x'
+        architecture: 'x64'
+    - name: install pypa/build and twine
+      run: >-
+        python -m
+        pip install
+        build
+        twine
+        --user
+    - name: The tag is the version of the package
+      if: startsWith(github.ref, 'refs/tags')
+      run: |
+        version=$(python -c "import re; print(re.search(r'__version__ = \"(.+)\"', open('src/felupe_contact/__about__.py').read()).group(1))")
+        echo "tag ${GITHUB_REF_NAME}, version ${version}"
+        test "${GITHUB_REF_NAME}" = "v${version}"
+    - name: build wheel
+      run: >-
+        python -m
+        build
+        --sdist
+        --wheel
+        --outdir dist/
+    - name: Check the metadata of the distributions
+      run: python -m twine check --strict dist/*
+    - name: The wheel in a fresh environment
+      run: |
+        python -m venv /tmp/wheel
+        /tmp/wheel/bin/pip install "$(ls dist/*.whl)"
+        cd /tmp && /tmp/wheel/bin/python -c "import felupe_contact; print(felupe_contact.__version__, felupe_contact.__all__)"
+    - name: Store the distributions
+      if: startsWith(github.ref, 'refs/tags')
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: dist
+        path: dist/
+        if-no-files-found: error
+
+  publish:
+    # a separate job without the build tools, the distributions are uploaded by
+    # trusted publishing (OIDC) instead of an API token
+    name: Publish the distributions to PyPI
+    if: startsWith(github.ref, 'refs/tags')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/felupe-contact
+    permissions:
+      id-token: write
+
+    steps:
+    - name: Download the distributions
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: dist
+        path: dist/
+    - name: Publish package to pypi
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

@@ -3,12 +3,12 @@
   <p align="center"><i>Contact Extension-package for FElupe.</i></p>
 </p>
 
-[![FElupe](https://img.shields.io/badge/%F0%9F%94%8D-FElupe-white)](https://felupe.readthedocs.io/en/stable/) [![Documentation Status](https://readthedocs.org/projects/felupe-contact/badge/?version=latest)](https://felupe-contact.readthedocs.io/en/latest/?badge=latest) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0) [![Project Status: WIP – Initial development is in progress, but there has not yet been a stable, usable release suitable for the public.](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip) [![codecov](https://codecov.io/gh/adtzlr/felupe-contact/branch/main/graph/badge.svg)](https://codecov.io/gh/adtzlr/felupe-contact) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![FElupe](https://img.shields.io/badge/%F0%9F%94%8D-FElupe-white)](https://felupe.readthedocs.io/en/stable/) [![PyPI version shields.io](https://img.shields.io/pypi/v/felupe-contact.svg)](https://pypi.python.org/pypi/felupe-contact/) ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/felupe-contact) [![Documentation Status](https://readthedocs.org/projects/felupe-contact/badge/?version=latest)](https://felupe-contact.readthedocs.io/en/latest/?badge=latest) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0) [![Project Status: WIP – Initial development is in progress, but there has not yet been a stable, usable release suitable for the public.](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip) [![codecov](https://codecov.io/gh/adtzlr/felupe-contact/branch/main/graph/badge.svg)](https://codecov.io/gh/adtzlr/felupe-contact) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 felupe-contact is an extension package for [FElupe](https://github.com/adtzlr/felupe) with contact formulations between the surfaces of (hyperelastic) solid bodies, which undergo large deformations and large relative displacements.
 
 > [!WARNING]
-> felupe-contact is in an early stage of development. It is not available on PyPI yet and its API may change without a deprecation.
+> felupe-contact is in an early stage of development. Its API may change without a deprecation.
 
 ## ✨ Highlights
 - ✅ a [contact between the surfaces of solid bodies](https://felupe-contact.readthedocs.io/en/latest/felupe_contact.html#felupe_contact.SolidBodyContact) (surface-to-surface, penalty-based) with optional [Coulomb friction](https://felupe-contact.readthedocs.io/en/latest/howto/friction.html)
@@ -23,8 +23,10 @@ felupe-contact is an extension package for [FElupe](https://github.com/adtzlr/fe
 Install Python, open a terminal and run
 
 ```shell
-pip install git+https://github.com/adtzlr/felupe-contact.git@main
+pip install felupe-contact
 ```
+
+The optional dependencies of FElupe, e.g. PyVista for the plots, are installed by `pip install felupe-contact[all]`. The development version is installed by `pip install git+https://github.com/adtzlr/felupe-contact.git@main`.
 
 The [documentation](https://felupe-contact.readthedocs.io/en/latest/) covers more details, like the required and optional dependencies.
 
@@ -80,7 +82,7 @@ tox -e main
 ```
 
 ## 📄 Changelog
-All notable changes to this project will be documented in [this file](CHANGELOG.md). The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to this project will be documented in [this file](https://github.com/adtzlr/felupe-contact/blob/main/CHANGELOG.md). The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## 🔓 License
 felupe-contact - Contact Extension-package for FElupe (C) 2026 Andreas Dutzler, Graz (Austria).

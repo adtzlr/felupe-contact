@@ -3,6 +3,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-26
+
 ### Added
 - Added `SolidBodyContact`.
 - Added the methods `SolidBodyContact.checkpoint()` and `SolidBodyContact.restore()`,
@@ -194,6 +196,12 @@ All notable changes to this project will be documented in this file. The format 
   test for one and for two materials with a stiffness ratio of 1000, the weights, a
   material model with state variables and a cutback) and Ex. 8, a rubber block which is
   pressed on a stiff base with two solid bodies.
+- Added `felupe_contact.__version__`, like `felupe.__version__`.
+- Added the workflow `publish-to-pypi.yml`, which builds the distributions on each push
+  and publishes them on PyPI for each tag `v*` by trusted publishing (OIDC) instead of
+  an API token, like FElupe. Before a release, it checks that the tag is the version of
+  the package and the metadata of the distributions (`twine check --strict`), and it
+  imports the wheel in a fresh environment.
 
 ### Fixed
 - Fixed the connected bodies of a body with an enclosed cavity. The bodies were
@@ -342,7 +350,14 @@ All notable changes to this project will be documented in this file. The format 
 - Changed the license-headers of the source files to SPDX license identifiers, like in
   FElupe. The headers stated that the files are part of FElupe.
 - Changed the version to `0.1.0-dev`: the version of an unreleased development state is
-  marked by the suffix `-dev`, like in FElupe.
+  marked by the suffix `-dev`, like in FElupe. The first release on PyPI is `0.1.0`.
+- Changed the required version of FElupe to v12.0.0 or later (`felupe>=12.0`). The
+  new tox-environment `oldest` runs the tests with FElupe v12.0.0, for Python 3.11 in
+  the workflow `upload-codecov.yml`.
+- Changed the installation in the README and in the documentation to the package on
+  PyPI, `pip install felupe-contact`. The development version is installed from the
+  `main` branch. The link to the changelog in the README is absolute, because the README
+  is also the description of the package on PyPI.
 - Changed the development status of the package metadata from *Production/Stable* to
   *Alpha* and added `numpy` and `scipy` to the required dependencies, which are imported
   directly by this package.
@@ -377,6 +392,4 @@ All notable changes to this project will be documented in this file. The format 
   both contact surfaces are now evaluated by a single helper `unit_normals()`.
 - Removed the hand-written interpolation of the deformed coordinates at the integration
   points of the secondary surface in favour of `felupe.Field.interpolate()`.
-- Removed the workflow `publish-to-pypi.yml`, which built the package on each push and
-  published it on PyPI for each tag. The package is published on PyPI later.
 - Removed the configuration of isort in `pyproject.toml`, which is replaced by ruff.
