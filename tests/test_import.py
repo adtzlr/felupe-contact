@@ -6,18 +6,23 @@ from felupe_contact.__about__ import __version__
 
 
 def test_import():
-    "The package exports the contact classes."
+    "The package exports the contact classes and its version."
 
-    assert felupe_contact.__all__ == ["SolidBodyContact", "SolidBodyContactNitsche"]
+    assert felupe_contact.__all__ == [
+        "__version__",
+        "SolidBodyContact",
+        "SolidBodyContactNitsche",
+    ]
     assert felupe_contact.SolidBodyContact is SolidBodyContact
     assert felupe_contact.SolidBodyContactNitsche is SolidBodyContactNitsche
 
 
 def test_version():
-    "The version is a non-empty string."
+    "The version is a non-empty string, exported by the package like in FElupe."
 
     assert isinstance(__version__, str)
     assert len(__version__) > 0
+    assert felupe_contact.__version__ == __version__
 
 
 if __name__ == "__main__":

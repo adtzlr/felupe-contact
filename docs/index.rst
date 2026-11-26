@@ -52,7 +52,7 @@ The contact is an item of FElupe, i.e. it is added to the items of a :class:`~fe
 
 .. warning::
 
-   felupe-contact is in an early stage of development. It is not available on PyPI yet and its API may change without a deprecation.
+   felupe-contact is in an early stage of development. Its API may change without a deprecation.
 
 Contact in FElupe and in felupe-contact
 ---------------------------------------
@@ -98,9 +98,15 @@ Install Python, open a terminal and run
 
 .. code-block:: shell
 
+   pip install felupe-contact
+
+The development version is installed from its ``main`` branch
+
+.. code-block:: shell
+
    pip install git+https://github.com/adtzlr/felupe-contact.git@main
 
-or clone the repository and install the package in editable mode.
+or by a clone of the repository in editable mode.
 
 .. code-block:: shell
 
@@ -110,11 +116,11 @@ or clone the repository and install the package in editable mode.
 
 felupe-contact has minimal requirements, all available at PyPI supporting all platforms.
 
-* `felupe <https://github.com/adtzlr/felupe>`_ for the finite element infrastructure
+* `felupe <https://github.com/adtzlr/felupe>`_ (v12.0 or later) for the finite element infrastructure
 * `numpy <https://github.com/numpy/numpy>`_ for array operations
 * `scipy <https://github.com/scipy/scipy>`_ for sparse matrices and the contact search
 
-The optional dependencies of FElupe, e.g. `pyvista <https://github.com/pyvista/pyvista>`_ for interactive visualizations and `matplotlib <https://github.com/matplotlib/matplotlib>`_ for plotting graphs, are installed by replacing the last line.
+The optional dependencies of FElupe, e.g. `pyvista <https://github.com/pyvista/pyvista>`_ for interactive visualizations and `matplotlib <https://github.com/matplotlib/matplotlib>`_ for plotting graphs, are installed by ``pip install felupe-contact[all]``, or by replacing the last line of the editable install.
 
 .. code-block:: shell
 
